@@ -3,18 +3,21 @@
   var A = {
     FARMERS_MIN: 4,        // farmers fijos mínimos (sube solo si falta catnip)
     REPLANEAR_SEG: 30,     // cada cuántos segundos revisa el reparto mientras ejecuta
-    HORAS_MAX: 48,         // límite de la simulación
+    HORAS_MAX: 168,        // límite de la simulación (7 días; avanza por saltos, así que no tarda)
     RESERVA_CAZA: 1000,    // catpower que siempre se deja
     CULTURA_PCT: 0.90,     // manuscripts automáticos al llegar a este % de culture
     STEEL_CADA_SEG: 60,
-    MAX_EDIFICIOS_AYUDA: 3, // cuántos edificios "que adelantan la meta" puede sugerir
+    MAX_EDIFICIOS_AYUDA: 10, // cuántos edificios "que adelantan la meta" puede sugerir (pueden repetirse: varios Oil Wells)
     RESERVA_FURS: 1000,    // furs que siempre se dejan (los gatitos los consumen y dan felicidad)
     MAX_BARCOS: 243,       // con 243 barcos el titanium sale en el 100 % de los tratos
     OPORTUNIDAD_PCT: 0.95, // compras de oportunidad: solo con recursos llenos a este %
     ESCASOS: ["gold", "titanium"], // se siguen produciendo aunque la meta no los necesite
-    ESCASOS_MAX_PCT: 0.4,  // como mucho este % de los gatitos libres se dedica a eso
+    ESCASOS_MAX_PCT: 0.4,  // como mucho este % de los gatitos libres se dedica a mantener los edificios que consumen
+    COLCHON_SEG: 120,      // insumos que se guardan para los edificios que consumen: este tiempo de consumo
     ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por titanium
-    ORO_DEJAR_PCT: 0.8     // …y se deja este % del tope de gold guardado
+    ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
+    EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
+    EDIFICIOS_EXCLUIR: ["unicornPasture"] // la Unicorn Pasture la decide "Invertir unicorns"
   };
   // ======================================================
   function tps() { return game.getTicksPerSecondUI ? game.getTicksPerSecondUI() : (game.ticksPerSecond || 5); } // velocidad real (con aceleración)
@@ -25,21 +28,23 @@
   var d = (window.__kgPlan && window.__kgPlan.d) || null, retomar = null;
   if (!d) { // al recargar la página: recupera opciones, bitácora y el plan que iba
     d = {};
-    try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
+    try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; d.modoEdificios = g.modoEdificios; d.historial = g.historial; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
   }
   d.on = Object.assign({ cielo: true, refinar: true, cazar: true, manuscript: true, steel: true, bsp: true, fe: true, unicornios: true,
-    festival: true, oportunidad: true, escasos: true, oroTitanio: true }, d.on || {}); // las opciones nuevas vienen encendidas
+    festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true }, d.on || {}); // las opciones nuevas vienen encendidas
   d.log = d.log || [];
+  d.historial = d.historial || []; // metas cumplidas: tiempo estimado y real
   d.tot = d.tot || {};          // resumen: totales desde que pegaste el script
   d.totDesde = d.totDesde || Date.now();
   d.plan = d.plan || null;      // plan calculado
   d.ejecutando = !!d.ejecutando;
   d.pausa = !!d.pausa;
-  var segundos = 0, ultimoReparto = -999, ultimoUnicornio = -999, infoUnicornio = "", calculando = false;
+  var segundos = 0, ultimoReparto = -999, ultimoUnicornio = -999, infoUnicornio = "", calculando = false, abiertos = {}, ultimaBusqueda = -999, ultimaReestimacion = 0, ultimaEtapa = null;
   function guardar() {
     try {
       localStorage.setItem(CLAVE, JSON.stringify({ on: d.on, log: d.log.slice(0, 40), tot: d.tot, totDesde: d.totDesde,
-        meta: d.plan ? { type: d.plan.type, name: d.plan.name } : null, ejecutando: d.ejecutando, pausa: d.pausa }));
+        meta: d.plan ? { type: d.plan.type, name: d.plan.name, auto: !!d.plan.auto, inicio: d.plan.inicio, estimado: d.plan.estimado, pausado: d.plan.pausado, pausaDesde: d.plan.pausaDesde, hechos: (d.plan.hechos || []).slice(-10) } : null,
+        ejecutando: d.ejecutando, pausa: d.pausa, modoEdificios: !!d.modoEdificios, historial: d.historial.slice(0, 10) }));
     } catch (e) {}
   }
   function esperar() { return new Promise(function (r) { setTimeout(r, 0); }); } // deja respirar al juego
@@ -49,13 +54,14 @@
   function titulo(n) { var r = R(n); return (r && r.title) || n; }
   function num(x) { var a = Math.abs(x); return a >= 1e6 ? (x / 1e6).toFixed(2) + "M" : a >= 1e3 ? (x / 1e3).toFixed(1) + "K" : (Math.round(x * 10) / 10).toString(); }
   function tiempo(s) {
-    if (!isFinite(s)) return "nunca (más de " + A.HORAS_MAX + " h)";
+    if (!isFinite(s)) return "nunca (más de " + textoLimite() + ")";
     if (s < 1.5) return "ya";
     if (s < 60) return Math.round(s) + " s";
     if (s < 3600) return Math.round(s / 60) + " min";
     return Math.floor(s / 3600) + " h " + Math.round((s % 3600) / 60) + " min";
   }
-  function hora() { var t = new Date(); return ("0" + t.getHours()).slice(-2) + ":" + ("0" + t.getMinutes()).slice(-2); }
+  function textoLimite() { return A.HORAS_MAX >= 48 ? Math.round(A.HORAS_MAX / 24) + " días" : A.HORAS_MAX + " h"; }
+  function hora(ts) { var t = ts ? new Date(ts) : new Date(); return ("0" + t.getHours()).slice(-2) + ":" + ("0" + t.getMinutes()).slice(-2); }
   function anotar(txt) { d.log.unshift(hora() + " " + txt); d.log.length = Math.min(d.log.length, 40); }
   function sumar(clave, n) { if (n > 0) d.tot[clave] = (d.tot[clave] || 0) + n; } // para el resumen
   // fabrica y anota en el resumen cuánto salió de verdad
@@ -229,10 +235,10 @@
     var mpBase = base.manpower || 0, mpQueda = Math.min(Math.max(0, mpBase), mpConv);
     base.manpower = mpBase - mpQueda; pasarCaza(base); base.manpower = mpQueda;
     // lo que aportan los gatitos (hunters) se caza, salvo lo que falte para los conversores
-    var faltaMp = mpConv - mpQueda;
+    var faltaMp = mpConv - mpQueda, mpCrudo = {};
     jobs.forEach(function (j) {
       if (m[j].manpower) {
-        var porGat = m[j].manpower, usa = Math.min(porGat, faltaMp / Math.max(1, N));
+        var porGat = m[j].manpower, usa = Math.min(porGat, faltaMp / Math.max(1, N)); mpCrudo[j] = porGat; // catpower por gatito, sin cazar
         m[j].manpower = porGat - usa; pasarCaza(m[j]); m[j].manpower = usa;
       }
       kit.forEach(function (g) {
@@ -247,7 +253,7 @@
         g.s[j] = n ? sum / n : 1;
       });
     });
-    return { jobs: jobs, m: m, base: base, conv: conv, kit: kit, N: libres.length, fijos: fijos, nFijos: nFijos, cat: cat, caza: cz, cache: {} };
+    return { jobs: jobs, m: m, base: base, conv: conv, kit: kit, N: libres.length, fijos: fijos, nFijos: nFijos, cat: cat, caza: cz, cache: {}, mpCrudo: mpCrudo };
   }
   // sube los farmers fijos hasta que el catnip alcance (promedio del año y reserva para el invierno)
   function medirSeguro() {
@@ -304,7 +310,7 @@
     return falta;
   }
   // política por etapas: todos los libres al oficio del recurso que más tarda
-  // (con un margen del 15 % para no estar cambiando de oficio a cada rato)
+  // (una etapa a la vez: se queda en un oficio hasta juntar todo lo de ese oficio para la compra que sigue)
   // lo que sale de un conversor (iron de los Smelters) se traduce en lo que el conversor consume
   // (descuenta lo que ya hay guardado del insumo, si no se usó ya para otra cosa)
   function pasarConversores(M, falta, st) {
@@ -321,14 +327,18 @@
     return falta;
   }
   function politica(M, st, preciosLista, jobActual) {
-    var falta = pasarConversores(M, faltante(st, preciosLista), st), peor = null, pt = -1, N = M.N, porJob = {};
+    var falta = pasarConversores(M, faltante(st, preciosLista), st), peor = null, pt = -1, N = M.N, porJob = {}, recJob = {};
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r); if (!j) return;
       var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N);
-      porJob[j] = Math.max(porJob[j] || 0, v);
-      if (v > pt) { pt = v; peor = j; }
+      // un recurso lleno que todavía "falta" (no se puede fabricar con él por ahora) no sirve para seguir en ese oficio
+      var tope = R(r) && R(r).maxValue, lleno = tope > 0 && (st[r] || 0) >= tope * 0.99;
+      if (!lleno && v > (porJob[j] || 0)) { porJob[j] = v; recJob[j] = r; }
+      if (!lleno && v > pt) { pt = v; peor = j; }
     });
-    if (jobActual && porJob[jobActual] && porJob[jobActual] * 1.15 >= pt) peor = jobActual;
+    // una etapa a la vez: se queda en el oficio actual hasta juntar todo lo de ese oficio, y recién ahí cambia
+    if (jobActual && porJob[jobActual] > 0) peor = jobActual;
+    ultimaEtapa = { job: peor, recurso: peor ? recJob[peor] : null, falta: peor ? falta[recJob[peor]] : 0 };
     if (!peor) peor = M.jobs.indexOf("scholar") >= 0 ? "scholar" : M.jobs[0];
     // primero los gatitos que mantienen andando lo escaso (gold, titanium); el resto, a la meta
     var mant = mantenimiento(M), usados = 0, a = {};
@@ -340,79 +350,255 @@
   // recursos escasos: aunque la meta no los pida, se siguen produciendo porque frenan otras metas.
   // Calcula cuántos gatitos hacen falta para que los conversores que los producen
   // (Smelters → gold, Calciner → titanium) no se queden sin insumos (wood, minerals…).
+  // Todos los edificios que consumen algo (Smelters, Calciner, Mints…) siguen andando:
+  // se asignan los gatitos que hacen falta para producir sus insumos (wood, minerals, catpower…).
   function mantenimiento(M) {
     if (M.mant) return M.mant;
     var o = {};
     if (d.on.escasos) {
       var nec = {};
-      M.conv.forEach(function (c) {
-        if (!A.ESCASOS.some(function (r) { return c.outs[r] > 0; })) return;
-        Object.keys(c.ins).forEach(function (q) { nec[q] = (nec[q] || 0) + c.ins[q]; });
-      });
+      M.conv.forEach(function (c) { Object.keys(c.ins).forEach(function (q) { nec[q] = (nec[q] || 0) + c.ins[q]; }); });
       var total = 0, tope = Math.floor(M.N * A.ESCASOS_MAX_PCT);
       Object.keys(nec).forEach(function (q) {
-        var j = mejorJob(M, q); if (!j) return;
-        var k = Math.ceil(Math.max(0, nec[q] - (M.base[q] || 0)) / M.m[j][q]);
+        var j, por;
+        if (q === "manpower") { // los hunters: su catpower sin contar lo que se caza
+          j = Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0]; por = j ? M.mpCrudo[j] : 0;
+        } else { j = mejorJob(M, q); por = j ? M.m[j][q] : 0; }
+        if (!j || !(por > 0)) return; // oil, gold…: no dependen de gatitos (para eso está la reserva)
+        var k = Math.ceil(Math.max(0, nec[q] - (M.base[q] || 0)) / por);
         k = Math.min(k, tope - total); if (k <= 0) return;
         o[j] = (o[j] || 0) + k; total += k;
       });
     }
     return (M.mant = o);
   }
+  // cuánto consumen por segundo los edificios encendidos (Con = conversores; PerTick negativo = Magneto con el oil)
+  function consumoPorSeg(r) {
+    var c = -Math.min(0, game.getEffect(r + "PerTickCon") || 0);
+    game.bld.buildingsData.forEach(function (b) { var v = (b.effects || {})[r + "PerTick"]; if (v < 0 && b.on) c += -v * b.on; });
+    return c * tps();
+  }
+  // reserva de insumos que nadie gasta, para que esos edificios no se queden sin nada y se apaguen
+  // la reserva nunca impide una compra que llena justo el tope
+  function colPara(col, x, tope) { return Math.max(0, Math.min(col[x.name] || 0, (tope || Infinity) - x.val)); }
+  function colchones() {
+    var o = {}; if (!d.on.escasos) return o;
+    game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > 0) o[r.name] = c * A.COLCHON_SEG; });
+    return o;
+  }
+  // edificios que gastan recursos y el juego apagó (p. ej. Magnetos sin oil): se vuelven a encender si hay insumos
+  function encenderConsumidores() {
+    game.bld.buildingsData.forEach(function (b) {
+      if (!b.val || typeof b.on !== "number" || b.on >= b.val) return;
+      var ef = b.effects || {}, ins = Object.keys(ef).filter(function (k) { return /PerTick(Con)?$/.test(k) && ef[k] < 0; });
+      if (!ins.length) return;
+      var hay = ins.every(function (k) {
+        var r = k.replace(/PerTick(Con)?$/, ""), por = -ef[k] * b.val * tps(); // lo que gastarían todos encendidos
+        return R(r) && R(r).value >= por * A.COLCHON_SEG;
+      });
+      if (!hay) return;
+      var antes = b.on; game.bld.getBuildingExt(b.name).set("on", b.val); refrescar(b);
+      anotar("Encendí " + (b.val - antes) + " " + etiqueta("buildings", b.name) + " (estaban apagados)");
+    });
+  }
 
   // =================== SIMULACIÓN ===================
-  // items: [{p: precios, cap: {res: +tope}, M: medición después de comprarlo}]
-  function simular(M, items, st0, capExtra) {
+  // items: [{p: precios, cap: {res: +tope}, gana: {res: +cantidad}, M: medición después de comprarlo}]
+  // Avanza "por saltos": entre un evento y otro (se alcanza una compra, algo se llena o se vacía,
+  // toca revisar el reparto) todo produce a ritmo constante, así que salta directo al siguiente evento.
+  var SIM_MAX_SALTO = 300, SIM_MIN_SALTO = 1, SIM_REPARTO_SEG = 60;
+
+  // ritmo neto por segundo con los conversores (Smelters, Calciner…) y lo que se pierde por estar lleno
+  function netos(M, rates, st, cap) {
+    var net = Object.assign({}, rates), cons = {}, sobra = {};
+    M.conv.forEach(function (c) { Object.keys(c.ins).forEach(function (q) { cons[q] = (cons[q] || 0) + c.ins[q]; }); });
+    M.conv.forEach(function (c) {
+      var f = 1; // si un insumo está en 0, el conversor anda solo con lo que va entrando
+      Object.keys(c.ins).forEach(function (q) { if ((st[q] || 0) <= 1e-6) f = Math.min(f, Math.max(0, rates[q] || 0) / cons[q]); });
+      Object.keys(c.ins).forEach(function (q) { net[q] = (net[q] || 0) - c.ins[q] * f; });
+      Object.keys(c.outs).forEach(function (r) { net[r] = (net[r] || 0) + c.outs[r] * f; });
+    });
+    Object.keys(net).forEach(function (r) {
+      if (net[r] > 0 && isFinite(cap[r]) && (st[r] || 0) >= cap[r] - 1e-6) { sobra[r] = net[r]; net[r] = 0; }
+    });
+    return { net: net, sobra: sobra };
+  }
+  function sumarGana(items) {
+    var g = {}; items.forEach(function (it) { Object.keys(it.gana || {}).forEach(function (r) { g[r] = (g[r] || 0) + it.gana[r]; }); });
+    return g;
+  }
+  // lo que gastan los automáticos mientras corre el plan (para que la simulación se parezca a la realidad)
+  function automaticosSim(st, cap, net, sobra, dt, resRaw, col, t, est) {
+    var libreS = function (r) { return (st[r] || 0) - (resRaw[r] || 0) - (col[r] || 0); };
+    // beam/slab/plate con lo que se desborda (el automático hace 1 fabricación por segundo)
+    if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"]].forEach(function (x) {
+      var r = x[0], prod = x[1], rc = rec(prod); if (!(sobra[r] > 0) || !rc) return;
+      var porVez = rc.porVez[r] || 0; if (!porVez) return;
+      var usa = Math.min(sobra[r], porVez) * dt; // como mucho una fabricación por segundo
+      st[prod] = (st[prod] || 0) + usa / porVez * rc.rinde;
+    });
+    // steel cada 60 s con el coal y el iron que el plan no necesita
+    if (d.on.steel && t - est.ultSteel >= A.STEEL_CADA_SEG && rec("steel")) {
+      est.ultSteel = t;
+      var ins = insumo("steel"), u = Infinity;
+      Object.keys(ins).forEach(function (q) { u = Math.min(u, Math.max(0, libreS(q)) / ins[q]); });
+      if (isFinite(u) && u > 0) { Object.keys(ins).forEach(function (q) { st[q] -= ins[q] * u; }); st.steel = (st.steel || 0) + u; }
+    }
+    // manuscripts con la culture al 90 % (el parchment sale de los furs, dejando la reserva)
+    if (d.on.manuscript && isFinite(cap.culture) && (st.culture || 0) >= cap.culture * A.CULTURA_PCT && rec("manuscript")) {
+      var im = insumo("manuscript"), parch = im.parchment || 0, cult = im.culture || 0, ip = rec("parchment") ? insumo("parchment") : null;
+      var pDisp = Math.max(0, libreS("parchment")), fDisp = Math.max(0, libreS("furs") - A.RESERVA_FURS);
+      var parchPosible = pDisp + (ip && ip.furs ? fDisp / ip.furs : 0);
+      var um = Math.min(cult ? Math.max(0, libreS("culture")) / cult : Infinity, parch ? parchPosible / parch : Infinity);
+      if (isFinite(um) && um > 0) {
+        var pUsa = um * parch, deParch = Math.min(pUsa, pDisp), hacerP = pUsa - deParch;
+        st.parchment -= deParch; if (ip && ip.furs) st.furs -= hacerP * ip.furs;
+        st.culture -= um * cult; st.manuscript = (st.manuscript || 0) + um;
+      }
+    }
+    // gold casi lleno → titanium con las Zebras
+    if (d.on.oroTitanio && est.z && isFinite(cap.gold) && (st.gold || 0) >= cap.gold * A.ORO_TRATOS_PCT &&
+        !(isFinite(cap.titanium) && (st.titanium || 0) >= cap.titanium * 0.98)) {
+      var z = est.z, fursTrato = z.catpower / est.cz.costo * est.cz.furs;
+      var n = Math.floor(((st.gold || 0) - Math.max(cap.gold * A.ORO_DEJAR_PCT, (resRaw.gold || 0) + (col.gold || 0))) / z.gold);
+      n = Math.min(n, Math.floor(Math.max(0, libreS(z.compra)) / z.compraVal), Math.floor(Math.max(0, libreS("furs") - A.RESERVA_FURS) / fursTrato));
+      if (n >= 1) {
+        st.gold -= n * z.gold; st[z.compra] -= n * z.compraVal; st.furs -= n * fursTrato;
+        st.titanium = Math.min(isFinite(cap.titanium) ? cap.titanium : Infinity, (st.titanium || 0) + n * z.ti);
+      }
+    }
+  }
+
+  function simular(M, items, st0, capExtra, limiteSeg) {
     var st = {}, cap = {};
     game.resPool.resources.forEach(function (r) { st[r.name] = st0 ? (st0[r.name] || 0) : r.value; cap[r.name] = r.maxValue ? r.maxValue + ((capExtra || {})[r.name] || 0) : Infinity; });
-    var k = 0, t = 0, dt = 4, limite = A.HORAS_MAX * 3600, alloc = null, rates = null, etapas = [];
-    while (k < items.length && t < limite) {
-      if (alloc === null || t % 20 === 0) {
+    var k = 0, t = 0, limite = limiteSeg || A.HORAS_MAX * 3600, alloc = null, rates = null, etapas = [], ultPol = -1e9;
+    var col = colchones(); // la compra deja la reserva de insumos de los edificios que consumen
+    var hist = [], resRaw = null, kRes = -1;
+    var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value };
+    var hacer = function (n, cant, nivel, reserva) {
+      if (cant <= 1e-9 || nivel > 6) return;
+      var ins = insumo(n);
+      Object.keys(ins).forEach(function (q) {
+        if (!esFab(q)) return;
+        var nec = ins[q] * cant + (reserva[q] || 0) - (st[q] || 0);
+        if (nec > 0) hacer(q, nec, nivel + 1, reserva);
+      });
+      var mm = cant;
+      Object.keys(ins).forEach(function (q) { mm = Math.min(mm, Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / ins[q]); });
+      if (mm > 0) { Object.keys(ins).forEach(function (q) { st[q] -= ins[q] * mm; }); st[n] = (st[n] || 0) + mm; }
+    };
+    var conCol = function (p) { return p.map(function (x) { return { name: x.name, val: x.val + colPara(col, x, cap[x.name]) }; }); };
+    var guardia = 0;
+    while (k < items.length && t < limite && guardia++ < 200000) {
+      if (kRes !== k) { // lo que el resto del plan necesita: los automáticos de la simulación no lo tocan
+        kRes = k; resRaw = faltante({}, items.slice(k).map(function (x) { return x.p; }));
+        est.z = zebras((st.ship || 0) - est.barcos0);
+      }
+      if (alloc === null || t - ultPol >= SIM_REPARTO_SEG) {
         // el reparto apunta a la compra que sigue (lo que tiene tope no se puede juntar por adelantado)
         var na = politica(M, st, [items[k].p], alloc ? Object.keys(alloc)[0] : null), nj = Object.keys(na)[0];
-        if (!etapas.length || etapas[etapas.length - 1].job !== nj) etapas.push({ job: nj, desde: t });
-        alloc = na; rates = tasas(M, alloc);
+        var ue = ultimaEtapa || {}, ult = etapas[etapas.length - 1];
+        if (!ult || ult.job !== nj || ult.paso !== k || ult.recurso !== ue.recurso) etapas.push({ job: nj, desde: t, paso: k, recurso: ue.job === nj ? ue.recurso : null });
+        alloc = na; rates = tasas(M, alloc); ultPol = t;
       }
-      Object.keys(rates).forEach(function (r) { st[r] = Math.max(0, Math.min(cap[r] === undefined ? Infinity : cap[r], (st[r] || 0) + rates[r] * dt)); });
-      M.conv.forEach(function (c) {
-        var f = 1;
-        Object.keys(c.ins).forEach(function (r) { f = Math.min(f, (st[r] || 0) / (c.ins[r] * dt)); });
-        f = Math.max(0, f);
-        Object.keys(c.ins).forEach(function (r) { st[r] -= c.ins[r] * dt * f; });
-        Object.keys(c.outs).forEach(function (r) { st[r] = Math.min(cap[r] === undefined ? Infinity : cap[r], (st[r] || 0) + c.outs[r] * dt * f); });
-      });
       // fabricar en cadena lo que pide la compra actual (sin tocar lo fabricado que el edificio pide directo)
       var pr = items[k].p, reserva = {};
       pr.forEach(function (y) { if (esFab(y.name)) reserva[y.name] = (reserva[y.name] || 0) + y.val; });
-      var hacer = function (n, cant, nivel) {
-        if (cant <= 1e-9 || nivel > 6) return;
-        var ins = insumo(n);
-        Object.keys(ins).forEach(function (q) {
-          if (!esFab(q)) return;
-          var nec = ins[q] * cant + (reserva[q] || 0) - (st[q] || 0);
-          if (nec > 0) hacer(q, nec, nivel + 1);
-        });
-        var mm = cant;
-        Object.keys(ins).forEach(function (q) { mm = Math.min(mm, Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / ins[q]); });
-        if (mm > 0) { Object.keys(ins).forEach(function (q) { st[q] -= ins[q] * mm; }); st[n] = (st[n] || 0) + mm; }
-      };
       pr.forEach(function (x) {
         if (!esFab(x.name)) return;
         var falta = x.val - (st[x.name] || 0); if (falta <= 0) return;
-        reserva[x.name] = 0; hacer(x.name, falta, 0); reserva[x.name] = x.val;
+        reserva[x.name] = 0; hacer(x.name, falta, 0, reserva); reserva[x.name] = x.val;
       });
-      while (k < items.length && items[k].p.every(function (x) { return (st[x.name] || 0) >= x.val - 1e-6; })) {
+      var compro = false;
+      while (k < items.length && items[k].p.every(function (x) { return (st[x.name] || 0) >= x.val + colPara(col, x, cap[x.name]) - 1e-6; })) {
         items[k].p.forEach(function (x) { st[x.name] -= x.val; });
         var it = items[k];
         if (it.cap) Object.keys(it.cap).forEach(function (r) { cap[r] = (cap[r] || 0) + it.cap[r]; });
-        if (it.gana) Object.keys(it.gana).forEach(function (r) { st[r] = (st[r] || 0) + it.gana[r]; });
+        if (it.gana) Object.keys(it.gana).forEach(function (r) { st[r] = Math.min(isFinite(cap[r]) ? cap[r] : Infinity, (st[r] || 0) + it.gana[r]); });
         if (it.M) M = it.M;
-        it.t = t; k++; alloc = null;
+        it.t = t; k++; alloc = null; compro = true;
       }
+      if (compro || k >= items.length) continue; // con la compra hecha, nuevo reparto antes de avanzar
+      var nn = netos(M, rates, st, cap), net = nn.net;
+      // ¿cuánto falta para el próximo evento?
+      var dt = Math.min(SIM_MAX_SALTO, SIM_REPARTO_SEG - (t - ultPol), limite - t);
+      var fa = faltante(st, [conCol(items[k].p)]), tAlc = 0;
+      Object.keys(fa).forEach(function (r) { tAlc = Math.max(tAlc, (net[r] || 0) > 1e-9 ? fa[r] / net[r] : Infinity); });
+      if (tAlc > 0) dt = Math.min(dt, tAlc);
+      Object.keys(net).forEach(function (r) {
+        var v = net[r], s = st[r] || 0;
+        if (v > 1e-9 && isFinite(cap[r]) && s < cap[r]) dt = Math.min(dt, (cap[r] - s) / v);
+        if (v < -1e-9 && s > 1e-6) dt = Math.min(dt, s / -v);
+      });
+      dt = Math.max(SIM_MIN_SALTO, dt);
+      Object.keys(net).forEach(function (r) { st[r] = Math.max(0, Math.min(isFinite(cap[r]) ? cap[r] : Infinity, (st[r] || 0) + net[r] * dt)); });
+      automaticosSim(st, cap, net, nn.sobra, dt, resRaw, col, t, est);
+      hist.push({ dt: dt, net: net });
       t += dt;
     }
-    return { t: k >= items.length ? t : Infinity, compradas: k, st: st, etapas: etapas };
+    if (k >= items.length) return { t: t, tEst: t, compradas: k, st: st, etapas: etapas };
+    return Object.assign({ t: Infinity, compradas: k, st: st, etapas: etapas, limite: t }, estimarResto(M, st, cap, col, items.slice(k), t, hist));
   }
+
+  // No terminó en el límite: estima cuánto más falta repartiendo a los gatitos entre lo que falta
+  // (busca por mitades el menor tiempo T en que los libres alcanzan para todo).
+  function estimarResto(M, st, cap, col, resto, t, hist) {
+    var precios = resto.map(function (x) { return x.p; }), gana = sumarGana(resto);
+    var falta = faltante(st, precios), total = faltante({}, precios);
+    // lo que dan los pasos que faltan (titanium de los tratos, barcos) no hace falta producirlo
+    Object.keys(gana).forEach(function (r) { if (falta[r]) { falta[r] = Math.max(0, falta[r] - gana[r]); if (falta[r] <= 1e-9) delete falta[r]; } });
+    // si los conversores no se mantienen solos, lo que sale de ellos se traduce en sus insumos
+    if (!d.on.escasos) pasarConversores(M, falta, st);
+    // ¿algo de un solo paso no cabe en el tope?
+    var noCabe = {};
+    resto.forEach(function (it) { it.p.forEach(function (x) { if (isFinite(cap[x.name]) && x.val + colPara(col, x, Infinity) > cap[x.name] + 1e-6) noCabe[x.name] = true; }); });
+    // ritmo base: los gatitos de mantenimiento + lo que no depende de gatitos; los conversores a pleno
+    var mant = mantenimiento(M), libres = M.N, a = {};
+    Object.keys(mant).forEach(function (j) { a[j] = mant[j]; libres -= mant[j]; });
+    var base = tasas(M, a), convMax = {};
+    M.conv.forEach(function (c) { Object.keys(c.outs).forEach(function (r) { convMax[r] = (convMax[r] || 0) + c.outs[r]; }); });
+    var alcanza = function (T) {
+      var porJob = {};
+      return Object.keys(falta).every(function (r) {
+        var need = falta[r] / T, b = (base[r] || 0) + (convMax[r] || 0), j = mejorJob(M, r);
+        if (need <= b) return true;
+        if (!j) return false;
+        porJob[j] = Math.max(porJob[j] || 0, (need - b) / M.m[j][r]); // un oficio puede dar varios recursos a la vez (hunter: furs e ivory)
+        return true;
+      }) && Object.keys(porJob).reduce(function (s, j) { return s + porJob[j]; }, 0) <= libres;
+    };
+    var T = Infinity;
+    if (!Object.keys(noCabe).length && alcanza(1e9)) {
+      var lo = 1, hi = 1e9;
+      for (var i = 0; i < 60; i++) { var mid = Math.sqrt(lo * hi); if (alcanza(mid)) hi = mid; else lo = mid; }
+      T = hi;
+    }
+    if (!Object.keys(falta).length && !Object.keys(noCabe).length) T = 0;
+    // ritmo promedio de la última hora simulada (para mostrar)
+    var prom = {}, acum = 0;
+    for (var h = hist.length - 1; h >= 0 && acum < 3600; h--) {
+      var e = hist[h], w = Math.min(e.dt, 3600 - acum); acum += w;
+      Object.keys(e.net).forEach(function (r) { prom[r] = (prom[r] || 0) + e.net[r] * w; });
+    }
+    Object.keys(prom).forEach(function (r) { prom[r] /= Math.max(1, acum); });
+    var avance = Object.keys(falta).map(function (r) {
+      var v = prom[r] || 0;
+      return { r: r, falta: falta[r], pct: total[r] > 0 ? Math.max(0, 1 - falta[r] / total[r]) : 0, porSeg: v,
+        t: noCabe[r] ? Infinity : v > 1e-9 ? falta[r] / v : Infinity, noCabe: !!noCabe[r] };
+    });
+    avance.sort(function (a, b) { return b.t - a.t; });
+    return { tEst: t + T, avance: avance, noCabe: Object.keys(noCabe) };
+  }
+  // tiempo para comparar planes: el real si termina en el límite; si no, el estimado
+  function tcomp(r) { return isFinite(r.t) ? r.t : r.tEst; }
+  function tiempoPlan(r) { return isFinite(r.t) ? tiempo(r.t) : isFinite(r.tEst) ? "más de " + textoLimite() + " (unas " + tiempo(r.tEst) + ", repartiendo a los gatitos entre lo que falta)" : "nunca a este ritmo"; }
+  // con el historial: cuánto tardaría si se equivoca como en tus últimas metas
+  function textoCorregido(sim) {
+    var fh = factorHistorial(), t = tcomp(sim); if (!fh || !isFinite(t) || Math.abs(fh.f - 1) < 0.05) return "";
+    return " <span style='color:#9aa3b2'>(según tus últimas " + fh.n + " metas, más bien ~" + tiempo(t * fh.f) + ")</span>";
+  }
+  function textoAhorro(x) { return isFinite(x) ? tiempo(x) : "la hace posible"; }
 
   // =================== ALMACENAMIENTO Y EDIFICIOS ===================
   function refrescar(meta) { game.updateCaches(); if (meta && meta.calculateEffects) meta.calculateEffects(meta, game); game.updateCaches(); }
@@ -483,7 +669,7 @@
         }
         if (acum < falta[r] - 1e-6) return;
         var todos = pasos.concat(lista).map(function (x) { return { p: x.p, cap: x.cap }; }).concat([{ p: pMeta }]);
-        var t = simular(M, todos, null, null).t;
+        var t = tcomp(simular(M, todos, null, null));
         if (!mejor || t < mejor.t || (!isFinite(mejor.t) && lista.length < mejor.lista.length)) mejor = { t: t, lista: lista, extraC: extraC };
       })(cand[ic]), await esperar();
       if (!mejor) continue;
@@ -498,37 +684,58 @@
     var necesarios = faltante(stock, items.map(function (i) { return i.p; }));
     var nec = Object.keys(necesarios); if (!nec.length) return [];
     if (necesarios.furs || necesarios.ivory) nec.push("manpower");
-    var elegidos = [], baseRates = prodActual();
+    var elegidos = [], M0 = M;
+    var nombres = function () { return elegidos.map(function (e) { return e.name; }); };
+    var itemsElegidos = function () { return elegidos.map(function (e) { return { p: e.p, M: e.M }; }); };
     for (var vuelta = 0; vuelta < A.MAX_EDIFICIOS_AYUDA; vuelta++) {
       var cand = [];
-      game.bld.buildingsData.forEach(function (b) {
-        if (!b.unlocked) return;
-        var p = game.bld.getPrices(b.name, elegidos.filter(function (e) { return e.name === b.name; }).length);
-        if (game.resPool.isStorageLimited(p)) return; // no cabe en tu almacenamiento (función del juego)
-        var delta;
-        try { delta = conEdificio(b.name, function () { var o = prodActual(); var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
-        // sirve si sube la producción de algo necesario (o lo potencia aunque hoy nadie trabaje en eso)
-        var gana = nec.some(function (r) { return delta[r] > 1e-9; }) ||
-          Object.keys(b.effects || {}).some(function (k) { return !/Max$/.test(k) && nec.some(function (r) { return k.indexOf(r) === 0 && (b.effects[k] || 0) > 0; }); });
-        if (gana) cand.push({ name: b.name, p: p, delta: delta });
+      // todo se mide como si ya tuvieras los edificios elegidos antes (así el 2.º Oil Well cuenta sobre el 1.º)
+      conVarios(nombres(), function () {
+        var baseRates = prodActual();
+        game.bld.buildingsData.forEach(function (b) {
+          if (!b.unlocked) return;
+          var p = game.bld.getPrices(b.name, elegidos.filter(function (e) { return e.name === b.name; }).length);
+          if (game.resPool.isStorageLimited(p)) return; // no cabe en tu almacenamiento (función del juego)
+          var delta;
+          try { delta = conEdificio(b.name, function () { var o = prodActual(); var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
+          // sirve si sube la producción de algo necesario (o lo potencia aunque hoy nadie trabaje en eso)
+          var gana = nec.some(function (r) { return delta[r] > 1e-9; }) ||
+            Object.keys(b.effects || {}).some(function (k) { return !/Max$/.test(k) && nec.some(function (r) { return k.indexOf(r) === 0 && (b.effects[k] || 0) > 0; }); });
+          if (gana) cand.push({ name: b.name, p: p, delta: delta });
+        });
       });
       var mejor = null;
+      // primero los más prometedores: cuánto acelera lo que falta (pesado por lo que tarda cada recurso) ÷ cuánto cuesta
+      var ritmos = prodActual();
+      cand.forEach(function (c) {
+        var gana = 0;
+        nec.forEach(function (r) {
+          var b = Math.max(1e-6, ritmos[r] || 0), peso = (necesarios[r] || 0) / b; // segundos que tardaría ese recurso
+          if (c.delta[r] > 0) gana += peso * c.delta[r] / b;
+        });
+        var costo = 1 + c.p.reduce(function (s, x) { var rr = R(x.name); return s + x.val / Math.max(1, rr.maxValue || rr.value || 1); }, 0);
+        c.puntaje = gana / costo;
+      });
+      cand.sort(function (a, b) { return b.puntaje - a.puntaje; });
       cand = cand.slice(0, 12);
       for (var ic = 0; ic < cand.length; ic++) {
         var c = cand[ic], M2;
-        try { M2 = conEdificio(c.name, function () { return medir(M.nFijos); }); } catch (e) { continue; }
-        var r = simular(M, [{ p: c.p, M: M2 }].concat(items));
-        var ahorro = tBase - r.t;
-        if (ahorro > 60 && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: r.t };
+        try { M2 = conVarios(nombres().concat([c.name]), function () { return medir(M0.nFijos); }); } catch (e) { continue; }
+        var r = simular(M0, itemsElegidos().concat([{ p: c.p, M: M2 }]).concat(items));
+        var tr = tcomp(r), ahorro = tBase - tr;
+        if (ahorro > 60 && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr };
         await esperar();
       }
       if (!mejor) break;
       elegidos.push({ type: "buildings", name: mejor.c.name, p: mejor.c.p, M: mejor.M2, motivo: "adelanta la meta", ahorro: mejor.ahorro });
-      items = [{ p: mejor.c.p, M: mejor.M2 }].concat(items);
       tBase = mejor.t;
-      M = mejor.M2;
     }
     return elegidos;
+  }
+  // corre fn() como si tuvieras +1 de cada edificio de la lista (puede repetir), y deja todo como estaba
+  function conVarios(lista, fn) {
+    if (!lista.length) return fn();
+    return conEdificio(lista[0], function () { return conVarios(lista.slice(1), fn); });
   }
 
   // barcos: cada uno sube la probabilidad (+0,35 %) y la cantidad (+0,03) de titanium por trato.
@@ -545,7 +752,7 @@
       var paso = { type: "ship", name: "ship", veces: veces, barcos: extra, motivo: "barcos",
         p: porVez.map(function (x) { return { name: x.name, val: x.val * veces }; }), gana: { ship: extra } };
       var items = prev.concat([{ p: paso.p, gana: paso.gana }]).concat(tr.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
-      var t = simular(M, items).t;
+      var t = tcomp(simular(M, items));
       await esperar();
       var ref = mejor ? mejor.t : tBase;
       if (t < ref - 60) { mejor = { paso: paso, tratos: tr, t: t }; peores = 0; }
@@ -555,8 +762,47 @@
     return mejor;
   }
 
+  // =================== MODO EDIFICIOS (después de la meta) ===================
+  // candidatos: edificios desbloqueados que caben en el almacenamiento, ordenados por cuánto tardan
+  async function rankingEdificios() {
+    var M = medirSeguro(), lista = [];
+    await esperar();
+    var cands = game.bld.buildingsData.filter(function (b) {
+      if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0) return false;
+      var meta = game.bld.getBuildingExt(b.name).meta;
+      if (meta.limitBuild && meta.val >= meta.limitBuild) return false;
+      var p = game.bld.getPrices(b.name);
+      return p.length && !game.resPool.isStorageLimited(p);
+    });
+    for (var i = 0; i < cands.length; i++) {
+      var b = cands[i], p = game.bld.getPrices(b.name);
+      var t = simular(M, [{ p: p }], null, null, A.EDIFICIOS_HORAS * 3600).t;
+      if (isFinite(t)) lista.push({ name: b.name, label: etiqueta("buildings", b.name), t: t });
+      if (i % 4 === 3) await esperar();
+    }
+    lista.sort(function (a, b) { return a.t - b.t; });
+    return lista;
+  }
+  // elige el edificio que tarda menos, arma su plan y lo ejecuta
+  async function siguienteEdificio() {
+    calculando = true;
+    try {
+      var lista = await rankingEdificios();
+      d.rankingEdificios = lista.slice(0, 5);
+      if (!lista.length) { if (segundos - (d.avisoEdificios || -1e9) > 600) { anotar("Edificios: ninguno se alcanza en " + A.EDIFICIOS_HORAS + " h; reviso de nuevo en un rato"); d.avisoEdificios = segundos; } return; }
+      var P = await calcularPlan("buildings", lista[0].name, { auto: true });
+      if (!isFinite(P.sim.t)) return;
+      d.plan = P; d.ejecutando = true; d.pausa = false; ultimoReparto = -999; empezarCronometro();
+      anotar("Edificios: voy por " + P.label + " (" + tiempo(P.sim.t) + ")" + (lista[1] ? "; después " + lista[1].label + " (" + tiempo(lista[1].t) + ")" : ""));
+      guardar();
+    } finally { calculando = false; }
+  }
+
   // =================== CALCULAR EL PLAN ===================
-  async function calcularPlan(type, name) {
+  async function calcularPlan(type, name, opts) {
+    var P = await calcularPlan0(type, name); P.auto = !!(opts && opts.auto); return P;
+  }
+  async function calcularPlan0(type, name) {
     RECETAS = {};
     var t0 = performance.now(), espera0 = 0;
     var M = medirSeguro();
@@ -569,16 +815,18 @@
     var tratos = pasosComercio(faltaTi);
     var itemsAlm = alm.pasos.map(function (s) { return { p: s.p, cap: s.cap }; });
     var items = itemsAlm.concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
-    var base = simular(M, items, null, null), tAhora = base.t;
+    var base = simular(M, items, null, null), tAhora = tcomp(base);
+    var tAhoraSinNada = tAhora; // para mostrar cuánto ahorran barcos y ayudas
     // ¿conviene fabricar barcos antes de comerciar?
-    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, base.t), pasoBarcos = [];
+    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora), pasoBarcos = [];
     if (barcos) {
       tratos = barcos.tratos; pasoBarcos = [barcos.paso]; tAhora = barcos.t;
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
         .concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
     }
     var ayudas = await planAyudas(M, items, tAhora);
-    var pasos = alm.pasos.concat(ayudas).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
+    // mismo orden que la simulación: primero las ayudas, después almacenamiento, barcos, tratos y la meta
+    var pasos = ayudas.concat(alm.pasos).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
     // simulación final con todo
     var itemsF = ayudas.map(function (a) { return { p: a.p, M: a.M }; }).concat(items);
     var fin = (ayudas.length || barcos) ? simular(M, itemsF) : base;
@@ -594,7 +842,7 @@
     porRec.sort(function (a, b) { return b.t - a.t; });
     var z = zebras();
     return {
-      type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: base.t,
+      type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: tAhoraSinNada,
       porRec: porRec, imposible: alm.imposible, ms: Math.round(performance.now() - t0),
       tratos: tratos.reduce(function (a, s) { return a + s.k; }, 0), faltaTi: faltaTi, zebras: z,
       sinZebras: faltaTi > 0 && !tratos.length
@@ -602,10 +850,10 @@
   }
 
   // =================== EJECUCIÓN ===================
-  function reservas() { // lo que el plan necesita y nadie más debe gastar
-    if (!d.plan || !d.ejecutando) return {};
+  function reservas() { // lo que el plan necesita (y los insumos de los edificios que consumen): nadie más debe gastarlo
+    var o = colchones();
+    if (!d.plan || !d.ejecutando) return o;
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = 0; });
-    var o = {};
     function reales(p) { return p.type === "trade" ? p.reales : p.p; }
     d.plan.pasos.forEach(function (p) { reales(p).forEach(function (x) { o[x.name] = (o[x.name] || 0) + x.val; }); });
     var bruto = faltante(stock, d.plan.pasos.map(reales));
@@ -622,7 +870,7 @@
   }
   // fabrica en cadena hacia los precios del paso actual
   function fabricarHacia(p) {
-    var reservaFab = {};
+    var reservaFab = colchones(); // tampoco fabrica gastando los insumos de Smelters, Magnetos, etc.
     p.forEach(function (y) { if (esFab(y.name)) reservaFab[y.name] = y.val; });
     function hacer(n, cant, nivel) {
       if (cant <= 0 || nivel > 6) return;
@@ -647,6 +895,7 @@
     var M = medirSeguro();
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual); // en un trato, p incluye los furs que cuesta su catpower
+    d.etapaActual = ultimaEtapa ? Object.assign({}, ultimaEtapa) : null; // para mostrar qué se está juntando
     d.jobActual = Object.keys(a)[0];
     var asig = asignar(M, a), kittens = game.village.sim.kittens, cambios = 0;
     function poner(k, job) {
@@ -660,13 +909,18 @@
     if (cambios) {
       game.village.updateResourceProduction(); game.villageTab && game.villageTab.updateTab && game.villageTab.updateTab();
       var j = Object.keys(a)[0], mt = mantenimiento(M);
-      anotar("Reparto: " + a[j] + " gatitos a " + (JT[j] || j) + (Object.keys(mt).length ? " + " + textoMant(mt) + " para gold/titanium" : "") + " (" + M.nFijos + " farmers fijos)");
+      anotar("Reparto: " + a[j] + " gatitos a " + (JT[j] || j) + (Object.keys(mt).length ? " + " + textoMant(mt) + " para mantener " + nombresConv(M) : "") + " (" + M.nFijos + " farmers fijos)");
     }
   }
   function pasoEjecutar() {
     if (!d.plan || !d.ejecutando || d.pausa) return;
     var p = d.plan.pasos[0];
-    if (!p) { anotar("¡Meta cumplida: " + d.plan.label + "!"); d.ejecutando = false; d.plan = null; guardar(); return; }
+    if (!p) {
+      anotar((d.plan.auto ? "Edificios: listo " : "¡Meta cumplida: ") + d.plan.label + (d.plan.auto ? "" : "!"));
+      registrarResultado();
+      if (d.on.edificios) { d.modoEdificios = true; ultimaBusqueda = -999; } // sigue con el edificio que tarde menos
+      d.ejecutando = false; d.plan = null; guardar(); return;
+    }
     if (p.type === "trade") { comerciar(p); }
     else if (p.type === "ship") { // fabricar barcos por tandas, a medida que alcanza
       fabricarHacia(p.p);
@@ -675,7 +929,7 @@
       if (n >= 1 && craftear("ship", n)) {
         p.veces -= n; p.p = p.p.map(function (x) { return { name: x.name, val: x.val / (p.veces + n) * p.veces }; });
         anotar("Fabriqué barcos: ahora tienes " + Math.floor(R("ship").value));
-        if (p.veces <= 0) { d.plan.pasos.shift(); ultimoReparto = -999; guardar(); }
+        if (p.veces <= 0) { terminarPaso(); ultimoReparto = -999; guardar(); }
       }
     }
     else {
@@ -686,14 +940,107 @@
     }
     p.p = precios(p.type, p.name); // precio actualizado
     fabricarHacia(p.p);
-    if (p.p.every(function (x) { return R(x.name).value >= x.val; })) {
+    var col = colchones(); // no deja sin insumos a Smelters, Magnetos, etc.
+    if (p.p.every(function (x) { return R(x.name).value >= x.val + colPara(col, x, R(x.name).maxValue || Infinity); })) {
       if (comprar(p.type, p.name)) {
         anotar("Compré " + etiqueta(p.type, p.name) + (p.motivo !== "meta" ? " (" + p.motivo + ")" : ""));
-        d.plan.pasos.shift(); ultimoReparto = -999; guardar();
+        terminarPaso(); ultimoReparto = -999; guardar();
       }
     }
     }
     if (segundos - ultimoReparto >= A.REPLANEAR_SEG) { ultimoReparto = segundos; aplicarReparto(); }
+  }
+
+  // ---------- pasos: hechos, actual y su avance ----------
+  function textoPaso(p) {
+    if (p.type === "trade") return "Comerciar " + p.k + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
+    if (p.type === "ship") {
+      var rinde = (rec("ship") || { rinde: 1 }).rinde, zb = zebras(p.veces * rinde);
+      return "Fabricar ~" + Math.round(p.veces * rinde) + " barcos <span style='color:#7fd19b'>(ahorra " + textoAhorro(p.ahorro || 0) + ")</span>" +
+        (zb ? " <span style='color:#9aa3b2'>→ ~" + num(zb.ti) + " titanium por trato</span>" : "");
+    }
+    return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
+      (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
+      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(ahorra " + textoAhorro(p.ahorro) + ")</span>" : "");
+  }
+  function terminarPaso() {
+    var p = d.plan.pasos.shift(); if (!p) return;
+    (d.plan.hechos = d.plan.hechos || []).push({ texto: textoPaso(p).replace(/<[^>]+>/g, ""), t: Date.now() });
+    d.jobActual = null; d.etapaActual = null; d.reestimar = true; // la etapa siguiente se elige de cero
+  }
+  // cuánto tienes de lo que pide un paso (los fabricados se cuentan en materias primas)
+  function avancePaso(p) {
+    var pr = p.type === "trade" ? p.reales : p.p; if (!pr || !pr.length) return [];
+    var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
+    var tot = faltante({}, [pr]), fal = faltante(stock, [pr]);
+    return Object.keys(tot).map(function (r) { return { r: r, pct: Math.max(0, Math.min(1, 1 - (fal[r] || 0) / tot[r])), falta: fal[r] || 0 }; })
+      .sort(function (a, b) { return a.pct - b.pct; });
+  }
+  function barra(pct) {
+    return "<span style='display:inline-block;width:80px;height:7px;background:#2a2f3a;border-radius:4px;vertical-align:middle;margin-right:4px'>" +
+      "<span style='display:block;height:7px;width:" + Math.round(pct * 100) + "%;background:#7fd19b;border-radius:4px'></span></span>";
+  }
+  function htmlPasos(P) {
+    var h = "<div><b>Pasos:</b><ul style='margin:2px 0 6px 0;padding:0;list-style:none'>";
+    (P.hechos || []).slice(-4).forEach(function (x) { h += "<li style='color:#7fd19b'>✓ " + x.texto + " <span style='color:#9aa3b2'>(" + hora(x.t) + ")</span></li>"; });
+    var et = P.sim.etapas || [];
+    P.pasos.forEach(function (p, i) {
+      var actual = i === 0 && d.ejecutando;
+      h += "<li style='margin-top:3px" + (actual ? ";color:#fff" : "") + "'>" + (actual ? "▶ " : (i + 1) + ". ") + textoPaso(p);
+      // etapas de este paso en la simulación: un recurso a la vez
+      var mias = et.filter(function (e) { return e.paso === i; });
+      if (mias.length) h += "<div style='color:#9aa3b2;font-size:11.5px;margin-left:14px'>" + mias.slice(0, 5).map(function (e) {
+        var sig = et[et.indexOf(e) + 1], fin = sig ? sig.desde : P.sim.t;
+        return (JT[e.job] || e.job) + (e.recurso ? " (" + titulo(e.recurso) + ")" : "") + " " + tiempo(e.desde).replace("ya", "0 min") + "–" + tiempo(fin);
+      }).join(" → ") + (mias.length > 5 ? " → …" : "") + "</div>";
+      if (actual) {
+        var av = avancePaso(p), tot = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1, ea = d.etapaActual;
+        h += "<div style='font-size:11.5px;margin-left:14px'>" + barra(tot) + Math.round(tot * 100) + " %" +
+          (p.type === "trade" ? " · faltan " + p.k + " tratos" : p.type === "ship" ? " · faltan " + p.veces + " fabricaciones" : "") + "</div>";
+        if (ea && ea.job) h += "<div style='font-size:11.5px;margin-left:14px;color:#c8cdd6'>Ahora: todos a <b>" + (JT[ea.job] || ea.job) + "</b>" +
+          (ea.recurso ? " juntando " + titulo(ea.recurso) : "") + "</div>";
+        if (av.length) h += "<div style='font-size:11.5px;margin-left:14px;color:#9aa3b2'>" + av.slice(0, 5).map(function (x) {
+          return titulo(x.r) + " " + Math.round(x.pct * 100) + " %" + (x.falta > 0 ? " (faltan " + num(x.falta) + ")" : "");
+        }).join(" · ") + "</div>";
+      }
+      h += "</li>";
+    });
+    return h + "</ul></div>";
+  }
+
+  // ---------- estimado vs real ----------
+  function empezarCronometro() {
+    if (!d.plan) return;
+    d.plan.inicio = Date.now(); d.plan.estimado = tcomp(d.plan.sim); d.plan.pausado = 0; d.plan.pausaDesde = null;
+  }
+  function cronometroPausa() {
+    var P = d.plan; if (!P || !P.inicio) return;
+    if (d.pausa) P.pausaDesde = Date.now();
+    else if (P.pausaDesde) { P.pausado = (P.pausado || 0) + (Date.now() - P.pausaDesde); P.pausaDesde = null; }
+  }
+  function registrarResultado() {
+    var P = d.plan; if (!P || !P.inicio || !isFinite(P.estimado)) return;
+    var real = (Date.now() - P.inicio - (P.pausado || 0)) / 1000;
+    if (real < 30) return; // demasiado corto para comparar
+    d.historial.unshift({ label: P.label, est: P.estimado, real: real, fecha: Date.now() });
+    d.historial.length = Math.min(d.historial.length, 10);
+    anotar("Estimado " + tiempo(P.estimado) + ", real " + tiempo(real) + " (" + (real >= P.estimado ? "+" : "") + Math.round((real / Math.max(1, P.estimado) - 1) * 100) + " %)");
+  }
+  // cuánto más (o menos) tardaron de verdad las últimas metas: real / estimado
+  function factorHistorial() {
+    var h = d.historial.filter(function (x) { return x.est > 60 && isFinite(x.est); }).slice(0, 5);
+    if (h.length < 2) return null;
+    return { f: h.reduce(function (s, x) { return s + x.real / x.est; }, 0) / h.length, n: h.length };
+  }
+  // vuelve a simular lo que queda del plan con la producción de ahora (p. ej. tras una compra de oportunidad)
+  function reestimar() {
+    var P = d.plan; if (!P || !P.pasos.length) return;
+    var items = P.pasos.map(function (p) {
+      if (p.type === "trade") return { p: p.p, gana: p.gana };
+      return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
+    });
+    P.sim = simular(medirSeguro(), items);
+    P.reestimadoEn = Date.now();
   }
 
   function comerciar(p) {
@@ -705,7 +1052,7 @@
     dip.tradeMultiple(z.race, n);
     p.k -= n; sumar("tratos", n); sumar("titanium", R("titanium").value - antes);
     anotar("Comercié " + n + " veces con las Zebras: +" + num(R("titanium").value - antes) + " titanium");
-    if (p.k <= 0) { d.plan.pasos.shift(); ultimoReparto = -999; guardar(); }
+    if (p.k <= 0) { terminarPaso(); ultimoReparto = -999; guardar(); }
   }
 
   // =================== AUTOMÁTICOS ===================
@@ -741,6 +1088,7 @@
     // si toca festival, la culture se junta para él (los manuscripts esperan)
     if (d.on.manuscript && lleno("culture", A.CULTURA_PCT) && !fest) manuscriptsConCultura(resF);
     if (d.on.oportunidad && segundos % 10 === 0) oportunidad(res);
+    if (d.on.escasos && segundos % 10 === 3) encenderConsumidores();
     if (d.on.steel && segundos % A.STEEL_CADA_SEG === 0) fabricar("steel", Infinity, res);
     if (d.on.bsp) {
       if (lleno("wood", 0.98)) fabricar("beam", 1, res);
@@ -842,7 +1190,7 @@
         if (r.maxValue > 0) return lleno(x.name, A.OPORTUNIDAD_PCT) || x.val <= l * 0.1;
         return x.val <= l * 0.5;
       });
-      if (ok && comprar("upgrades", u.name)) { sumar("oportunidad", 1); anotar("Oportunidad: compré " + u.label + " con lo que sobraba"); return; }
+      if (ok && comprar("upgrades", u.name)) { sumar("oportunidad", 1); anotar("Oportunidad: compré " + u.label + " con lo que sobraba"); d.reestimar = true; return; }
     }
   }
 
@@ -903,7 +1251,7 @@
     if (mejor.type === "zigguratUpgrades") {
       if (mejor.sacr > 0) { game.religion.sacrificeUnicornsToTarget(mejor.sacr * zig); anotar("Unicornios: sacrifiqué " + num(mejor.sacr * 2500) + " por tears"); }
     }
-    if (comprar(mejor.type, mejor.name)) anotar("Unicornios: compré " + mejor.label);
+    if (comprar(mejor.type, mejor.name)) { anotar("Unicornios: compré " + mejor.label); d.reestimar = true; }
   }
 
   // =================== PANEL ===================
@@ -929,8 +1277,10 @@
   var FUN = [["cielo", "Observe the sky"], ["refinar", "Refinar catnip lleno"], ["cazar", "Cazar"], ["manuscript", "Manuscripts (culture " + Math.round(A.CULTURA_PCT * 100) + "%)"],
     ["steel", "Steel cada " + A.STEEL_CADA_SEG + " s"], ["bsp", "Beam/slab/plate al llenarse"], ["fe", "Gastar la fe"], ["unicornios", "Invertir unicorns"],
     ["festival", "Festivales (desde Drama)"], ["oportunidad", "Compras de oportunidad (mejoras del workshop con lo que sobra)"],
-    ["escasos", "Seguir produciendo gold y titanium (gatitos que alimentan Smelters y Calciner)"],
-    ["oroTitanio", "Gold casi lleno → cambiar el sobrante por titanium con las Zebras"]];
+    ["escasos", "Mantener andando los edificios que consumen (Smelters, Calciner, Mints, Magnetos…): gatitos para sus insumos, reserva de " + Math.round(A.COLCHON_SEG / 60) + " min de consumo y volver a encenderlos"],
+    ["oroTitanio", "Gold casi lleno → cambiar el sobrante por titanium con las Zebras"],
+    ["edificios", "Al terminar la meta, seguir comprando edificios (el que tarde menos, sin frenar Smelters, Calciner, Mints ni Magnetos)"]];
+  function nombresConv(M) { return M.conv.map(function (c) { return etiqueta("buildings", c.nombre); }).join(", ") || "los conversores"; }
   function textoMant(mt) { return Object.keys(mt).map(function (j) { return mt[j] + " " + (JT[j] || j); }).join(" y "); }
   var vista = "";
   // resumen: totales desde que se pegó el script (o desde "Reiniciar")
@@ -977,44 +1327,41 @@
       h.push("Gold: " + num(go.value) + " / " + num(go.maxValue) + ", " + (gs >= 0 ? "+" : "") + gs.toFixed(2) + "/s" +
         (gs > 0 && go.value < go.maxValue ? " → lleno en " + tiempo((go.maxValue - go.value) / gs) : ""));
     } catch (e) {}
+    if (d.historial.length) {
+      var fh = factorHistorial();
+      h.push("Estimado vs real" + (fh ? " (últimas " + fh.n + " metas: tardaron " + (fh.f >= 1 ? Math.round((fh.f - 1) * 100) + " % más" : Math.round((1 - fh.f) * 100) + " % menos") + " de lo estimado)" : "") + ": " +
+        d.historial.slice(0, 3).map(function (x) { return x.label + " " + tiempo(x.est) + " → " + tiempo(x.real); }).join(" · "));
+    }
     h.push("Velocidad del juego: " + tps().toFixed(1) + " ticks/s");
     return h.join("<br>");
   }
   function pintarPlan() {
     if (calculando) return '<div style="color:#e0b050">Calculando… (el juego sigue andando)</div>';
-    var P = d.plan; if (!P) return '<div style="color:#9aa3b2">Elige una meta y presiona Calcular.</div>';
-    var h = "<div style='margin:6px 0'><b>Meta:</b> " + P.label + " — <b>" + tiempo(P.sim.t) + "</b>" +
-      (P.sinAyuda !== P.sim.t ? " <span style='color:#9aa3b2'>(sin los edificios sugeridos: " + tiempo(P.sinAyuda) + ")</span>" : "") + "</div>";
+    var P = d.plan, rk = (d.rankingEdificios || []).map(function (x) { return x.label + " " + tiempo(x.t); }).join(" · ");
+    if (!P) {
+      if (d.modoEdificios && d.on.edificios) return "<div style='color:#7fd19b'>Modo edificios: buscando el que tarde menos…</div>" +
+        (rk ? "<div style='color:#9aa3b2;font-size:11.5px'>Últimos candidatos: " + rk + "</div>" : "");
+      return '<div style="color:#9aa3b2">Elige una meta y presiona Calcular.</div>' +
+        "<div style='margin-top:4px'><button data-a='edificios' style='" + est + "'>Solo comprar edificios</button></div>";
+    }
+    var h = (P.auto ? "<div style='color:#7fd19b;font-size:11.5px'>Modo edificios: el que tarda menos" + (rk ? "<br><span style='color:#9aa3b2'>Candidatos: " + rk + "</span>" : "") + "</div>" : "") +
+      "<div style='margin:6px 0'><b>Meta:</b> " + P.label + " — <b>" + tiempoPlan(P.sim) + "</b>" + textoCorregido(P.sim) +
+      (Math.abs(tcomp(P.sim) - P.sinAyuda) > 1 ? " <span style='color:#9aa3b2'>(sin los edificios sugeridos: " + (isFinite(P.sinAyuda) ? (P.sinAyuda > A.HORAS_MAX * 3600 ? "unas " : "") + tiempo(P.sinAyuda) : "nunca a ese ritmo") + ")</span>" : "") + "</div>";
+    if (!isFinite(P.sim.t) && P.sim.avance) { // no alcanza en el límite: hasta dónde llega
+      h += "<div style='color:#e0b050'>En " + textoLimite() + " llegarías a:<ul style='margin:2px 0 6px 18px;padding:0'>" + P.sim.avance.slice(0, 5).map(function (x) {
+        return "<li>" + titulo(x.r) + ": " + Math.round(x.pct * 100) + " % (faltan " + num(x.falta) + ", " +
+          (x.noCabe ? "no cabe en tu almacenamiento" : x.porSeg > 1e-9 ? "+" + num(x.porSeg) + "/s → " + tiempo(x.t) + " más" : "no se produce") + ")</li>";
+      }).join("") + "</ul></div>";
+    }
     if (P.imposible) h += "<div style='color:#e57373'>No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", ") + ".</div>";
     if (P.sinZebras) h += "<div style='color:#e57373'>Faltan " + num(P.faltaTi) + " de titanium y no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco).</div>";
     if (P.tratos && P.zebras) h += "<div style='color:#9aa3b2;font-size:11.5px'>Zebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos, " + num(P.zebras.porTi) +
       " cada vez → ~" + num(P.zebras.ti) + " por trato en promedio. Si sale menos, agrega tratos solo.</div>";
-    h += "<div><b>Pasos:</b><ol style='margin:2px 0 6px 18px;padding:0'>";
-    P.pasos.forEach(function (p) {
-      if (p.type === "trade") { h += "<li>Comerciar " + p.k + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span></li>"; return; }
-      if (p.type === "ship") {
-        var zb = zebras(p.veces * (rec("ship") || { rinde: 1 }).rinde);
-        h += "<li>Fabricar ~" + Math.round(p.veces * (rec("ship") || { rinde: 1 }).rinde) + " barcos <span style='color:#7fd19b'>(ahorra " + tiempo(p.ahorro || 0) + ")</span>" +
-          (zb ? " <span style='color:#9aa3b2'>→ ~" + num(zb.ti) + " titanium por trato</span>" : "") + "</li>"; return;
-      }
-      h += "<li>" + (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
-        (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
-        (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(ahorra " + tiempo(p.ahorro) + ")</span>" : "") + "</li>";
-    });
-    h += "</ol></div>";
-    if (P.sim.etapas.length) {
-      var mtP = mantenimiento(P.M);
-      h += "<div><b>Gatitos por etapas</b> (" + P.M.N + " libres + " + P.M.nFijos + " farmers)" +
-        (Object.keys(mtP).length ? "<br><span style='color:#9aa3b2;font-size:11.5px'>Siempre: " + textoMant(mtP) + " para que Smelters y Calciner sigan haciendo gold y titanium</span>" : "") +
-        ":<ul style='margin:2px 0 6px 18px;padding:0'>";
-      var et = P.sim.etapas.slice(0, 8);
-      et.forEach(function (e, i) {
-        var fin = i + 1 < P.sim.etapas.length ? P.sim.etapas[i + 1].desde : P.sim.t;
-        h += "<li>" + tiempo(e.desde).replace("ya", "0 min") + " → " + tiempo(fin) + ": todos a <b>" + (JT[e.job] || e.job) + "</b></li>";
-      });
-      if (P.sim.etapas.length > 8) h += "<li>… (va alternando)</li>";
-      h += "</ul></div>";
-    }
+    var mtP = mantenimiento(P.M);
+    h += "<div style='color:#9aa3b2;font-size:11.5px'>Gatitos: " + P.M.N + " libres + " + P.M.nFijos + " farmers" +
+      (Object.keys(mtP).length ? " · siempre " + textoMant(mtP) + " para mantener andando " + nombresConv(P.M) : "") +
+      ". Los libres juntan <b>un recurso a la vez</b>: terminan uno y pasan al siguiente.</div>";
+    h += htmlPasos(P);
     h += "<div><b>Qué te frena</b> (con todos los libres en su mejor oficio):<ul style='margin:2px 0 6px 18px;padding:0'>";
     P.porRec.slice(0, 5).forEach(function (x) {
       h += "<li>" + titulo(x.r) + ": falta " + num(x.falta) + " → " + tiempo(x.t) + (x.solo ? " <span style='color:#9aa3b2'>(no depende de gatitos)</span>" : x.conv ? " con tus " + x.conv + " a tope (necesitan sus insumos)" : " con " + (JT[x.job] || x.job)) + "</li>";
@@ -1032,11 +1379,11 @@
     h += '<div style="display:flex;gap:6px;margin:8px 0;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:260px">' + opcionesMeta() + "</select>" +
       '<button data-a="calc" style="' + est + ';background:#2a4a6b">Calcular</button></div>';
     h += '<div id="kgP_plan">' + vista + "</div>";
-    h += "<details style='margin-top:8px'><summary><b>Automático</b></summary>";
+    h += "<details data-det='auto' style='margin-top:8px'" + (abiertos.auto ? " open" : "") + "><summary><b>Automático</b></summary>";
     FUN.forEach(function (f) { h += '<label style="display:block"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>"; });
     h += "</details>";
     if (infoUnicornio) h += "<div style='margin-top:6px;font-size:11.5px'><b>Unicorns:</b> " + infoUnicornio + "</div>";
-    h += "<details style='margin-top:6px'><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
+    h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
     h += "<div style='margin-top:6px'><b>Resumen</b><div style='font-size:11.5px'>" + infoResumen() + "</div></div>";
     h += "<div style='margin-top:6px'><b>Bitácora</b><div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 15).join("<br>") || "—") + "</div></div>";
     var sel = document.getElementById("kgP_meta"), valor = sel ? sel.value : null;
@@ -1044,9 +1391,11 @@
     if (valor) { var s2 = document.getElementById("kgP_meta"); if (s2) s2.value = valor; }
   }
   caja.addEventListener("change", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-k"); if (k) { d.on[k] = e.target.checked; guardar(); } });
-  async function calcularYMostrar(type, name) {
+  // el panel se redibuja cada 2 s: recordar qué secciones dejó abiertas ("toggle" no sube, por eso se escucha en captura)
+  caja.addEventListener("toggle", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-det"); if (k) abiertos[k] = e.target.open; }, true);
+  async function calcularYMostrar(type, name, opts) {
     calculando = true; vista = pintarPlan(); pintar();
-    try { d.plan = await calcularPlan(type, name); anotar("Plan calculado para " + d.plan.label); }
+    try { d.plan = await calcularPlan(type, name, opts); anotar("Plan calculado para " + d.plan.label); }
     finally { calculando = false; }
   }
   caja.addEventListener("click", async function (e) {
@@ -1058,10 +1407,11 @@
         var v = document.getElementById("kgP_meta").value.split("|");
         await calcularYMostrar(v[0], v[1]);
       }
-      if (a === "si" && d.plan) { d.ejecutando = true; d.pausa = false; ultimoReparto = -999; anotar("Ejecutando el plan: " + d.plan.label); }
-      if (a === "pausa") { d.pausa = !d.pausa; anotar(d.pausa ? "Plan en pausa" : "Plan reanudado"); }
+      if (a === "si" && d.plan) { d.ejecutando = true; d.pausa = false; ultimoReparto = -999; empezarCronometro(); anotar("Ejecutando el plan: " + d.plan.label); }
+      if (a === "pausa") { d.pausa = !d.pausa; cronometroPausa(); anotar(d.pausa ? "Plan en pausa" : "Plan reanudado"); }
       if (a === "resumen0") { d.tot = {}; d.totDesde = Date.now(); }
-      if (a === "cancelar") { d.ejecutando = false; d.plan = null; anotar("Plan cancelado"); }
+      if (a === "cancelar") { d.ejecutando = false; d.plan = null; d.modoEdificios = false; anotar("Plan cancelado"); }
+      if (a === "edificios") { d.modoEdificios = true; ultimaBusqueda = -999; anotar("Modo edificios: compra el edificio que tarde menos"); }
       guardar(); vista = pintarPlan(); pintar();
     } catch (er) { console.error(er); anotar("Error: " + er.message); pintar(); }
   });
@@ -1072,6 +1422,14 @@
     if (calculando) return;
     try { automaticos(); } catch (e) { console.error("[Planificador auto]", e); }
     try { pasoEjecutar(); } catch (e) { console.error("[Planificador plan]", e); anotar("Error: " + e.message); }
+    if (d.plan && d.ejecutando && !d.pausa && (d.reestimar || segundos - ultimaReestimacion >= 300)) {
+      ultimaReestimacion = segundos; d.reestimar = false;
+      try { reestimar(); } catch (e) { console.error("[Planificador reestimar]", e); }
+    }
+    if (!d.plan && d.modoEdificios && d.on.edificios && !d.pausa && segundos - ultimaBusqueda >= 30) {
+      ultimaBusqueda = segundos;
+      siguienteEdificio().catch(function (e) { console.error(e); anotar("Edificios: error " + e.message); });
+    }
     if (segundos % 10 === 0) guardar();
     if (segundos % 2 === 0) {
       if (document.activeElement && document.activeElement.id === "kgP_meta") return;
@@ -1081,11 +1439,18 @@
 
   window.__kgPlan = { timer: timer, caja: caja, d: d, _test: { simular: simular, calcularPlan: calcularPlan, medirSeguro: medirSeguro, opcionesUnicornio: opcionesUnicornio, reservas: reservas, caza: caza, zebras: zebras, pasosComercio: pasosComercio, infoDatos: infoDatos,
     planBarcos: planBarcos, efectoFestival: efectoFestival, festivalQuiere: festivalQuiere, oportunidad: oportunidad, lleno: lleno, infoResumen: infoResumen,
-    mantenimiento: mantenimiento, oroATitanio: oroATitanio, asignar: asignar, politica: politica } };
+    mantenimiento: mantenimiento, oroATitanio: oroATitanio, asignar: asignar, politica: politica,
+    rankingEdificios: rankingEdificios, siguienteEdificio: siguienteEdificio,
+    colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
-    calcularYMostrar(retomar.meta.type, retomar.meta.name).then(function () {
-      if (d.plan) { d.ejecutando = true; d.pausa = !!retomar.pausa; anotar("Retomé el plan: " + d.plan.label); guardar(); }
+    calcularYMostrar(retomar.meta.type, retomar.meta.name, { auto: !!retomar.meta.auto }).then(function () {
+      if (d.plan) {
+        d.ejecutando = true; d.pausa = !!retomar.pausa;
+        ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (retomar.meta[k] !== undefined) d.plan[k] = retomar.meta[k]; }); // sigue el mismo cronómetro
+        if (!d.plan.inicio) empezarCronometro();
+        anotar("Retomé el plan: " + d.plan.label); guardar();
+      }
       vista = pintarPlan(); pintar();
     }).catch(function (e) { console.error(e); anotar("No pude retomar el plan: " + e.message); });
   }
