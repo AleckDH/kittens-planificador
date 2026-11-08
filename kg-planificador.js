@@ -327,7 +327,8 @@
     return falta;
   }
   function politica(M, st, preciosLista, jobActual) {
-    var falta = pasarConversores(M, faltante(st, preciosLista), st), peor = null, pt = -1, N = M.N, porJob = {}, recJob = {};
+    var stc = sinCol(st, colchones()); // la reserva de insumos no cuenta como disponible
+    var falta = pasarConversores(M, faltante(stc, preciosLista), stc), peor = null, pt = -1, N = M.N, porJob = {}, recJob = {};
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r); if (!j) return;
       var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N);
@@ -381,6 +382,8 @@
   // reserva de insumos que nadie gasta, para que esos edificios no se queden sin nada y se apaguen
   // la reserva nunca impide una compra que llena justo el tope
   function colPara(col, x, tope) { return Math.max(0, Math.min(col[x.name] || 0, (tope || Infinity) - x.val)); }
+  // stock sin la reserva de insumos (lo que de verdad se puede usar)
+  function sinCol(st, col) { var o = Object.assign({}, st); Object.keys(col || {}).forEach(function (r) { o[r] = Math.max(0, (o[r] || 0) - col[r]); }); return o; }
   function colchones() {
     var o = {}; if (!d.on.escasos) return o;
     game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > 0) o[r.name] = c * A.COLCHON_SEG; });
@@ -488,7 +491,6 @@
       Object.keys(ins).forEach(function (q) { mm = Math.min(mm, Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / ins[q]); });
       if (mm > 0) { Object.keys(ins).forEach(function (q) { st[q] -= ins[q] * mm; }); st[n] = (st[n] || 0) + mm; }
     };
-    var conCol = function (p) { return p.map(function (x) { return { name: x.name, val: x.val + colPara(col, x, cap[x.name]) }; }); };
     var guardia = 0;
     while (k < items.length && t < limite && guardia++ < 200000) {
       if (kRes !== k) { // lo que el resto del plan necesita: los automáticos de la simulación no lo tocan
@@ -503,7 +505,7 @@
         alloc = na; rates = tasas(M, alloc); ultPol = t;
       }
       // fabricar en cadena lo que pide la compra actual (sin tocar lo fabricado que el edificio pide directo)
-      var pr = items[k].p, reserva = {};
+      var pr = items[k].p, reserva = Object.assign({}, col); // al fabricar tampoco se toca la reserva de insumos
       pr.forEach(function (y) { if (esFab(y.name)) reserva[y.name] = (reserva[y.name] || 0) + y.val; });
       pr.forEach(function (x) {
         if (!esFab(x.name)) return;
@@ -523,7 +525,7 @@
       var nn = netos(M, rates, st, cap), net = nn.net;
       // ¿cuánto falta para el próximo evento?
       var dt = Math.min(SIM_MAX_SALTO, SIM_REPARTO_SEG - (t - ultPol), limite - t);
-      var fa = faltante(st, [conCol(items[k].p)]), tAlc = 0;
+      var fa = faltante(sinCol(st, col), [items[k].p]), tAlc = 0;
       Object.keys(fa).forEach(function (r) { tAlc = Math.max(tAlc, (net[r] || 0) > 1e-9 ? fa[r] / net[r] : Infinity); });
       if (tAlc > 0) dt = Math.min(dt, tAlc);
       Object.keys(net).forEach(function (r) {
@@ -545,7 +547,7 @@
   // (busca por mitades el menor tiempo T en que los libres alcanzan para todo).
   function estimarResto(M, st, cap, col, resto, t, hist) {
     var precios = resto.map(function (x) { return x.p; }), gana = sumarGana(resto);
-    var falta = faltante(st, precios), total = faltante({}, precios);
+    var falta = faltante(sinCol(st, col), precios), total = faltante({}, precios);
     // lo que dan los pasos que faltan (titanium de los tratos, barcos) no hace falta producirlo
     Object.keys(gana).forEach(function (r) { if (falta[r]) { falta[r] = Math.max(0, falta[r] - gana[r]); if (falta[r] <= 1e-9) delete falta[r]; } });
     // si los conversores no se mantienen solos, lo que sale de ellos se traduce en sus insumos
@@ -972,7 +974,7 @@
   function avancePaso(p) {
     var pr = p.type === "trade" ? p.reales : p.p; if (!pr || !pr.length) return [];
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
-    var tot = faltante({}, [pr]), fal = faltante(stock, [pr]);
+    var tot = faltante({}, [pr]), fal = faltante(sinCol(stock, colchones()), [pr]);
     return Object.keys(tot).map(function (r) { return { r: r, pct: Math.max(0, Math.min(1, 1 - (fal[r] || 0) / tot[r])), falta: fal[r] || 0 }; })
       .sort(function (a, b) { return a.pct - b.pct; });
   }
