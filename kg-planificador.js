@@ -265,6 +265,9 @@
   function asignar(M, a) {
     var cupo = {}, asig = M.kit.map(function () { return null; });
     Object.keys(a).forEach(function (j) { if (a[j] > 0) cupo[j] = a[j]; });
+    // el líder rinde ~×10 en cualquier oficio: siempre al de la meta (el primero de a), no al de mantenimiento
+    var jMeta = Object.keys(a).filter(function (j) { return cupo[j] > 0; })[0];
+    M.kit.forEach(function (g, n) { if (g.lider && jMeta) { asig[n] = jMeta; cupo[jMeta]--; } });
     var pares = [];
     M.kit.forEach(function (g, n) { Object.keys(cupo).forEach(function (j) { pares.push([g.s[j] || 0, n, j]); }); });
     pares.sort(function (x, y) { return y[0] - x[0]; });
@@ -1078,7 +1081,7 @@
 
   window.__kgPlan = { timer: timer, caja: caja, d: d, _test: { simular: simular, calcularPlan: calcularPlan, medirSeguro: medirSeguro, opcionesUnicornio: opcionesUnicornio, reservas: reservas, caza: caza, zebras: zebras, pasosComercio: pasosComercio, infoDatos: infoDatos,
     planBarcos: planBarcos, efectoFestival: efectoFestival, festivalQuiere: festivalQuiere, oportunidad: oportunidad, lleno: lleno, infoResumen: infoResumen,
-    mantenimiento: mantenimiento, oroATitanio: oroATitanio } };
+    mantenimiento: mantenimiento, oroATitanio: oroATitanio, asignar: asignar, politica: politica } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     calcularYMostrar(retomar.meta.type, retomar.meta.name).then(function () {
