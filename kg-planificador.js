@@ -12,7 +12,7 @@
     MAX_BARCOS: 243,       // con 243 barcos el titanium sale en el 100 % de los tratos
     OPORTUNIDAD_PCT: 0.95, // compras de oportunidad: solo con recursos llenos a este %
     ESCASOS: ["gold", "titanium"], // se siguen produciendo aunque la meta no los necesite
-    ESCASOS_MAX_PCT: 0.4,  // como mucho este % de los gatitos libres se dedica a mantener los edificios que consumen
+    ESCASOS_MAX_PCT: 0.7,  // modo edificios: como mucho este % de los libres mantiene los que consumen y los tratos gold → titanium
     COLCHON_SEG: 120,      // insumos que se guardan para los edificios que consumen: este tiempo de consumo
     MANT_MARGEN: 1.15,     // margen al calcular los gatitos de mantenimiento (los que quedan rinden menos que el promedio)
     SOSTENER_MAX: 10,      // como mucho tantos edificios por recurso para que no se acabe (p. ej. Oil Wells)
@@ -873,7 +873,7 @@
     var M = medirSeguro(), lista = [];
     await esperar();
     var cands = game.bld.buildingsData.filter(function (b) {
-      if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0) return false;
+      if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0 || consumeSinSostener(b, M)) return false; // p. ej. un Magneto con el oil bajando
       var meta = game.bld.getBuildingExt(b.name).meta;
       if (meta.limitBuild && meta.val >= meta.limitBuild) return false;
       var p = game.bld.getPrices(b.name);
@@ -1292,10 +1292,10 @@
     var n = Math.floor((g.value - Math.max(g.maxValue * A.ORO_DEJAR_PCT, res.gold || 0)) / z.gold);
     if (n < 1) return estado("el plan necesita ese gold");
     // catpower: cada trato pide z.catpower (los Mints también lo consumen)
-    var nCat = Math.floor((libre("manpower", res) - A.RESERVA_CAZA) / z.catpower);
+    var nCat = Math.floor(libre("manpower", res) / z.catpower); // para comerciar no hace falta la reserva de caza (sí la de los Mints)
     if (nCat < 1) {
       var mint = game.bld.get("mint"), cons = consumoPorSeg("manpower");
-      return estado("falta catpower: hay " + num(R("manpower").value) + ", cada trato pide " + z.catpower + " y se dejan " + A.RESERVA_CAZA +
+      return estado("falta catpower: hay " + num(R("manpower").value) + ", cada trato pide " + z.catpower + (res.manpower ? " y se guardan " + num(res.manpower) + " para los Mints" : "") +
         (mint && mint.on ? " (tus " + mint.on + " Mints consumen " + num(cons) + "/s)" : "") + ". Hacen falta hunters.");
     }
     n = Math.min(n, nCat, game.diplomacy.getMaxTradeAmt(z.race) || n);
