@@ -16,8 +16,10 @@
     COLCHON_SEG: 120,      // insumos que se guardan para los edificios que consumen: este tiempo de consumo
     MANT_MARGEN: 1.15,     // margen al calcular los gatitos de mantenimiento (los que quedan rinden menos que el promedio)
     SOSTENER_MAX: 10,      // como mucho tantos edificios por recurso para que no se acabe (p. ej. Oil Wells)
-    ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por titanium
+    ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por lo que falte (o titanium)
     ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
+    ORO_RENTABLE_PCT: 0.8, // tratos rentables (idea de Kitten Scientists): solo con el gold por encima de este % del tope
+    FABRICAR_PCT: 0.05,    // beam/slab/plate al llenarse: cada segundo usa este % del material
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
     EDIFICIOS_EXCLUIR: ["unicornPasture"] // la Unicorn Pasture la decide "Invertir unicorns"
   };
@@ -33,7 +35,7 @@
     try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; d.modoEdificios = g.modoEdificios; d.historial = g.historial; d.apagadosMano = g.apagados || {}; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
   }
   d.on = Object.assign({ cielo: true, refinar: true, cazar: true, manuscript: true, steel: true, bsp: true, fe: true, unicornios: true,
-    festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true }, d.on || {}); // las opciones nuevas vienen encendidas
+    festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true, lider: true }, d.on || {}); // las opciones nuevas vienen encendidas
   d.log = d.log || [];
   d.historial = d.historial || []; // metas cumplidas: tiempo estimado y real
   d.tot = d.tot || {};          // resumen: totales desde que pegaste el script
@@ -1270,6 +1272,7 @@
       d.cuentaTratos = d.cuentaTratos || {};
       Object.keys(d.ritmoTratos).forEach(function (q) { d.cuentaTratos[q] = Math.min(d.ritmoTratos[q] * 3600, (d.cuentaTratos[q] || 0) + d.ritmoTratos[q]); });
     }
+    if (d.on.lider && segundos % 10 === 5) ascenderLider(res); // antes que los tratos: el gold primero va al líder
     if (d.on.oroTitanio && !pasoTrato) oroATitanio(res); // antes de cazar, para que quede catpower
     if (d.on.cazar && (lleno("manpower", 0.99) || (necesitaCaza && d.ejecutando))) {
       var reservaCaza = A.RESERVA_CAZA + (pasoTrato ? (zebras() || { catpower: 50 }).catpower * Math.min(d.plan.pasos[0].k, 50) : 0);
@@ -1290,9 +1293,12 @@
     if (d.on.escasos && segundos % 10 === 3) encenderConsumidores();
     if (d.on.steel && segundos % A.STEEL_CADA_SEG === 0) fabricar("steel", Infinity, res);
     if (d.on.bsp) {
-      if (lleno("wood", 0.98)) fabricar("beam", 1, res);
-      if (lleno("minerals", 0.98)) fabricar("slab", 1, res);
-      if (lleno("iron", 0.995)) fabricar("plate", 1, res);
+      // al llenarse, cada segundo fabrica con el 5 % del material (antes 1 por segundo: se perdía lo que desbordaba)
+      [["wood", "beam", 0.98], ["minerals", "slab", 0.98], ["iron", "plate", 0.995]].forEach(function (x) {
+        if (!lleno(x[0], x[2])) return;
+        var rc = rec(x[1]), porVez = rc && rc.porVez[x[0]]; if (!porVez) return;
+        fabricar(x[1], Math.max(1, Math.floor(R(x[0]).value * A.FABRICAR_PCT / porVez)), res);
+      });
     }
     if (d.on.fe) fe(res);
     if (d.on.unicornios && segundos - ultimoUnicornio >= 15) { ultimoUnicornio = segundos; unicornios(res); }
@@ -1413,6 +1419,32 @@
     });
     return out;
   }
+  // producción por segundo; lo fabricable suma lo que se podría fabricar con lo que entra de sus insumos (como Kitten Scientists)
+  function tickDe(r, prof) {
+    var t = game.getResourcePerTick(r, true) * tps(), rc = (prof || 0) < 3 ? rec(r) : null;
+    if (rc) {
+      var min = Infinity;
+      Object.keys(rc.porVez).forEach(function (q) { var tq = tickDe(q, (prof || 0) + 1); min = Math.min(min, tq * rc.rinde / rc.porVez[q]); });
+      if (isFinite(min)) t += Math.max(0, min);
+    }
+    return t;
+  }
+  // ¿conviene el trato? (idea de Kitten Scientists, TradeManager.getProfitability): cada recurso vale
+  // "segundos de producción". Costo: gold + catpower + lo que pide la raza; ganancia: lo que da, solo lo que cabe.
+  function rentabilidad(o) {
+    var pagos = { gold: o.gold, manpower: o.catpower }, costo = 0, gana = 0;
+    pagos[o.compra] = (pagos[o.compra] || 0) + o.compraVal;
+    for (var r in pagos) { var t = tickDe(r); if (!(t > 0)) return null; costo += pagos[r] / t; } // se paga con algo que no se produce o baja
+    var nCabe = 0;
+    Object.keys(o.da).forEach(function (q) {
+      var res = R(q), cabe = res.maxValue ? Math.max(0, res.maxValue - res.value) : Infinity, cant = Math.min(o.da[q], cabe);
+      if (o.da[q] > 0) nCabe = Math.max(nCabe, cabe / o.da[q]);
+      if (!(cant > 0)) return;
+      var t = tickDe(q);
+      gana += cant / Math.max(t, 0.1); // si no se produce (o baja), se cuenta como si entrara 0,1 por segundo
+    });
+    return { ratio: costo > 0 ? gana / costo : 0, nCabe: Math.floor(nCabe) };
+  }
   // lo que le falta al plan en curso (en materias primas, sin contar la reserva de insumos)
   function faltaPlanAhora() {
     if (!d.plan || !d.ejecutando || !d.plan.pasos.length) return {};
@@ -1423,13 +1455,30 @@
     return o;
   }
 
+  // ---------- ascender al líder con gold (idea de Kitten Scientists, autoPromoteLeader) ----------
+  // Costo del juego (js/village.js, goldToPromote): 25 × (rango + 1) de gold, y además la experiencia del líder.
+  function ascenderLider(res) {
+    var v = game.village, L = v.leader, civ = game.science.get("civil");
+    if (!L || !civ || !civ.researched || !v.sim || !v.sim.promote) return;
+    var costo = 25 * (L.rank + 1);
+    if (R("gold").value - ((res || {}).gold || 0) < costo) { d.liderEstado = "rango " + L.rank + "; el próximo cuesta " + costo + " gold"; return; }
+    if (v.sim.expToPromote && !v.sim.expToPromote(L.rank, L.rank + 1, L.exp)[0]) { d.liderEstado = "rango " + L.rank + "; le falta experiencia para el " + (L.rank + 1); return; }
+    var antes = L.rank;
+    if (v.sim.promote(L, antes + 1) === 1) {
+      sumar("ascensos", 1); anotar("Ascendí al líder a rango " + L.rank + " (" + costo + " gold)");
+      d.liderEstado = "rango " + L.rank + " (ascendido " + hora() + ")";
+      ultimoReparto = -999; d.reestimar = true; // produce más: volver a medir
+    }
+  }
+
   // ---------- gold lleno: el sobrante se cambia por lo que le falta al plan (o por titanium si no falta nada) ----------
   function oroATitanio(res) {
     var g = R("gold"), ti = R("titanium");
     var estado = function (txt) { d.oroEstado = txt; };
     var opciones = tratosRazas();
     if (!opciones.length) return estado("todavía no puedes comerciar");
-    if (!g.maxValue || g.value < g.maxValue * A.ORO_TRATOS_PCT) return estado("esperando que el gold llegue al " + Math.round(A.ORO_TRATOS_PCT * 100) + " % (" + num(g.value) + " / " + num(g.maxValue) + ")");
+    var pct = g.maxValue ? g.value / g.maxValue : 0;
+    if (!g.maxValue || pct < A.ORO_RENTABLE_PCT) return estado("esperando que el gold pase el " + Math.round(A.ORO_RENTABLE_PCT * 100) + " % (" + num(g.value) + " / " + num(g.maxValue) + ")");
     // con quién: la raza cuyo trato cubre más de lo que falta, sin pagar con algo que también falta
     var falta = faltaPlanAhora(), resT = Object.assign({}, res), cb = colchonesBase(), mejor = null;
     Object.keys(cb).forEach(function (q) { resT[q] = Math.max(resT[q] || 0, cb[q]); }); // nunca paga con los insumos de los Smelters
@@ -1439,10 +1488,20 @@
       Object.keys(o.da).forEach(function (r) { if (falta[r] > 0 && o.da[r] > 0) { v += Math.min(1, o.da[r] / falta[r]); que.push(r); } });
       if (v > 0 && (!mejor || v > mejor.v)) mejor = { o: o, v: v, que: que };
     });
+    if (!mejor) { // si al plan no le falta nada que vendan: el trato más rentable (lo que recibe vale más que lo que paga)
+      var mr = null;
+      opciones.forEach(function (o) {
+        if (falta[o.compra] > 0) return;
+        var rt = rentabilidad(o); if (!rt || rt.ratio < 1 || rt.nCabe < 1) return;
+        if (!mr || rt.ratio > mr.ratio) mr = { o: o, ratio: rt.ratio, nCabe: rt.nCabe };
+      });
+      if (mr) mejor = { o: mr.o, rent: mr, que: Object.keys(mr.o.da).filter(function (r) { return mr.o.da[r] > 0 && (!R(r).maxValue || R(r).value < R(r).maxValue); }) };
+    }
     if (!mejor) {
+      if (pct < A.ORO_TRATOS_PCT) return estado("ningún trato es rentable ahora; con el gold al " + Math.round(A.ORO_TRATOS_PCT * 100) + " % compra titanium (" + num(g.value) + " / " + num(g.maxValue) + ")");
       var oz = opciones.filter(function (o) { return o.race.name === "zebras"; })[0];
-      if (!oz) return estado("al plan no le falta nada que vendan las razas" + (Object.keys(falta).length ? "" : " (sin plan)") + ", y todavía no puedes comerciar con las Zebras");
-      if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return estado("al plan no le falta nada que vendan las razas y el titanium está lleno");
+      if (!oz) return estado("al plan no le falta nada que vendan las razas, ningún trato es rentable y todavía no puedes comerciar con las Zebras");
+      if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return estado("al plan no le falta nada, ningún trato es rentable y el titanium está lleno");
       mejor = { o: oz, que: ["titanium"] };
     }
     var z = mejor.o;
@@ -1451,6 +1510,7 @@
       var nec = 0; mejor.que.forEach(function (r) { nec = Math.max(nec, Math.ceil(falta[r] / z.da[r])); });
       n = Math.min(n, nec);
     }
+    if (mejor.rent) n = Math.min(n, mejor.rent.nCabe); // no comerciar más de lo que cabe (Kitten Scientists)
     if (n < 1) return estado("el plan necesita ese gold");
     // catpower: cada trato pide z.catpower (los Mints también lo consumen)
     var nCat = Math.floor(libre("manpower", res) / z.catpower); // para comerciar no hace falta la reserva de caza (sí la de los Mints)
@@ -1483,7 +1543,7 @@
     sumar("tratos", n); if (z.race.name === "zebras") sumar("titanium", R("titanium").value - (antes.titanium || 0));
     var txt = gano.map(function (x) { return "+" + num(x.v) + " " + titulo(x.r); }).join(", ") || "nada (mala suerte)";
     estado("comerció " + n + " veces con " + z.titulo + " por " + mejor.que.map(titulo).join(", ") + " (" + hora() + ")");
-    anotar("Gold casi lleno: " + n + " tratos con " + z.titulo + (mejor.v ? " (al plan le falta " + mejor.que.map(titulo).join(", ") + ")" : "") + " → " + txt);
+    anotar("Gold: " + n + " tratos con " + z.titulo + (mejor.v ? " (al plan le falta " + mejor.que.map(titulo).join(", ") + ")" : mejor.rent ? " (rentable: recibe " + mejor.rent.ratio.toFixed(1) + " veces lo que paga)" : "") + " → " + txt);
   }
 
   // ---------- compras de oportunidad: mejoras del workshop con lo que sobra ----------
@@ -1587,14 +1647,15 @@
     ["steel", "Steel cada " + A.STEEL_CADA_SEG + " s"], ["bsp", "Beam/slab/plate al llenarse"], ["fe", "Gastar la fe"], ["unicornios", "Invertir unicorns"],
     ["festival", "Festivales (desde Drama)"], ["oportunidad", "Compras de oportunidad (mejoras del workshop con lo que sobra)"],
     ["escasos", "En el modo edificios: mantener andando los que consumen (Smelters, Calciner, Mints, Magnetos…): gatitos para sus insumos, reserva de " + Math.round(A.COLCHON_SEG / 60) + " min de consumo, Oil Wells si baja el oil y slabs para los tratos"],
-    ["oroTitanio", "Gold casi lleno → comerciar el sobrante por lo que le falta al plan (si no falta nada, titanium con las Zebras)"],
+    ["oroTitanio", "Gold sobre el " + Math.round(A.ORO_RENTABLE_PCT * 100) + " % → comerciar por lo que le falta al plan o lo más rentable (al " + Math.round(A.ORO_TRATOS_PCT * 100) + " %, titanium con las Zebras)"],
+    ["lider", "Ascender al líder con gold (25 × rango siguiente)"],
     ["edificios", "Al terminar la meta, seguir comprando edificios (el que tarde menos, sin frenar Smelters, Calciner, Mints ni Magnetos)"]];
   function nombresConv(M) { return M.conv.map(function (c) { return etiqueta("buildings", c.nombre); }).join(", ") || "los conversores"; }
   function textoMant(mt) { return Object.keys(mt).map(function (j) { return mt[j] + " " + (JT[j] || j); }).join(" y "); }
   var vista = "";
   // resumen: totales desde que se pegó el script (o desde "Reiniciar")
   var NOMBRES_TOT = [["cazas", "cazas"], ["furs", "furs"], ["ivory", "ivory"], ["parchment", "parchment"], ["manuscript", "manuscripts"], ["compedium", "compendiums"],
-    ["steel", "steel"], ["beam", "beams"], ["slab", "slabs"], ["plate", "plates"], ["ship", "barcos"], ["tratos", "tratos"], ["embajadas", "embassies"], ["titanium", "titanium (comercio)"],
+    ["steel", "steel"], ["beam", "beams"], ["slab", "slabs"], ["plate", "plates"], ["ship", "barcos"], ["tratos", "tratos"], ["embajadas", "embassies"], ["ascensos", "ascensos del líder"], ["titanium", "titanium (comercio)"],
     ["compras", "compras"], ["oportunidad", "de oportunidad"], ["festivales", "festivales"], ["praise", "Praise the sun"], ["cielo", "Observe the sky"]];
   function infoResumen() {
     var t = d.tot, partes = NOMBRES_TOT.filter(function (x) { return t[x[0]] > 0; }).map(function (x) { return "<b>" + num(t[x[0]]) + "</b> " + x[1]; });
@@ -1695,6 +1756,7 @@
     var apag = Object.keys(d.apagadosMano || {});
     if (apag.length) h += "<div style='margin-top:4px;font-size:11.5px'><b>Apagados por ti (no los enciendo):</b> " + apag.map(function (n) { return etiqueta("buildings", n); }).join(", ") + "</div>";
     if (d.on.manuscript && d.culturaEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Culture:</b> " + d.culturaEstado + "</div>";
+    if (d.on.lider && d.liderEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Líder:</b> " + d.liderEstado + "</div>";
     if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → tratos:</b>" + d.oroEstado + "</div>";
     h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
     h += "<div style='margin-top:6px'><b>Resumen</b><div style='font-size:11.5px'>" + infoResumen() + "</div></div>";
