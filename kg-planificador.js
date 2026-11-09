@@ -1203,7 +1203,8 @@
       }
     }
     // si toca festival, la culture se junta para él (los manuscripts esperan)
-    if (d.on.manuscript && lleno("culture", A.CULTURA_PCT) && !fest) manuscriptsConCultura(resF);
+    if (segundos % 10 === 0) { fursHist.push(R("furs").value); if (fursHist.length > 31) fursHist.shift(); }
+    if (d.on.manuscript && lleno("culture", A.CULTURA_PCT) && !fest) gastarCultura(resF);
     if (d.on.oportunidad && segundos % 10 === 0) oportunidad(res);
     if (d.on.escasos && segundos % 10 === 3) encenderConsumidores();
     if (d.on.steel && segundos % A.STEEL_CADA_SEG === 0) fabricar("steel", Infinity, res);
@@ -1227,6 +1228,37 @@
     if (!rp || !rp.unlocked) return posible;
     game.workshop.getCraftPrice(rp).forEach(function (p) { veces = Math.min(veces, Math.floor(libre(p.name, res) / p.val)); });
     return posible + Math.max(0, isFinite(veces) ? veces : 0) * rindeP;
+  }
+  // culture: primero embassies (la más barata) mientras quepan en el tope; el resto en manuscripts, solo si los furs aguantan
+  var fursHist = []; // furs cada 10 s (últimos 5 min)
+  function fursAguantan() { // no bajaron en los últimos 5 min (con cazas, consumo de los gatitos y parchment incluidos)
+    if (fursHist.length < 31) return true;
+    return R("furs").value >= fursHist[0];
+  }
+  function embajadaMasBarata() {
+    var mejor = null;
+    (game.diplomacy.races || []).forEach(function (r) {
+      if (!r.unlocked || !r.embassyPrices) return;
+      var p = precios("embassies", r.name).filter(function (x) { return x.name === "culture"; })[0];
+      if (p && (!mejor || p.val < mejor.val)) mejor = { raza: r.name, titulo: r.title || r.name, val: p.val };
+    });
+    return mejor;
+  }
+  function gastarCultura(res) {
+    var cap = R("culture").maxValue, e = null;
+    for (var i = 0; i < 5; i++) {
+      e = embajadaMasBarata(); if (!e || e.val > cap * 0.99) { e = null; break; }
+      if (e.val > libre("culture", res)) break;
+      if (!comprar("embassies", e.raza)) break;
+      sumar("embajadas", 1); anotar("Embassy con " + e.titulo + " (" + Math.round(e.val) + " culture)");
+      e = null;
+    }
+    var furOk = fursAguantan();
+    if (e) d.culturaEstado = "juntando culture para la embassy con " + e.titulo + " (" + Math.round(e.val) + ")";
+    else if (!furOk) d.culturaEstado = "sin manuscripts: los furs bajaron en los últimos 5 min (" + Math.round(fursHist[0]) + " → " + Math.round(R("furs").value) + ")";
+    else d.culturaEstado = "embassies fuera del tope; la culture va a manuscripts";
+    if (e || !furOk) return; // espera la embassy, o los furs no dan para parchment
+    manuscriptsConCultura(res);
   }
   // gasta la culture en manuscripts (el parchment sale de los furs, dejando la reserva)
   function manuscriptsConCultura(res) {
@@ -1416,7 +1448,7 @@
     }
     return grupo("Investigaciones", techs, "tech") + grupo("Mejoras del workshop", ups, "upgrades") + grupo("Edificios", blds, "buildings");
   }
-  var FUN = [["cielo", "Observe the sky"], ["refinar", "Refinar catnip lleno"], ["cazar", "Cazar"], ["manuscript", "Manuscripts (culture " + Math.round(A.CULTURA_PCT * 100) + "%)"],
+  var FUN = [["cielo", "Observe the sky"], ["refinar", "Refinar catnip lleno"], ["cazar", "Cazar"], ["manuscript", "Culture al " + Math.round(A.CULTURA_PCT * 100) + "%: embassies y manuscripts (estos solo si los furs aguantan)"],
     ["steel", "Steel cada " + A.STEEL_CADA_SEG + " s"], ["bsp", "Beam/slab/plate al llenarse"], ["fe", "Gastar la fe"], ["unicornios", "Invertir unicorns"],
     ["festival", "Festivales (desde Drama)"], ["oportunidad", "Compras de oportunidad (mejoras del workshop con lo que sobra)"],
     ["escasos", "En el modo edificios: mantener andando los que consumen (Smelters, Calciner, Mints, Magnetos…): gatitos para sus insumos, reserva de " + Math.round(A.COLCHON_SEG / 60) + " min de consumo, Oil Wells si baja el oil y slabs para los tratos"],
@@ -1427,7 +1459,7 @@
   var vista = "";
   // resumen: totales desde que se pegó el script (o desde "Reiniciar")
   var NOMBRES_TOT = [["cazas", "cazas"], ["furs", "furs"], ["ivory", "ivory"], ["parchment", "parchment"], ["manuscript", "manuscripts"], ["compedium", "compendiums"],
-    ["steel", "steel"], ["beam", "beams"], ["slab", "slabs"], ["plate", "plates"], ["ship", "barcos"], ["tratos", "tratos"], ["titanium", "titanium (comercio)"],
+    ["steel", "steel"], ["beam", "beams"], ["slab", "slabs"], ["plate", "plates"], ["ship", "barcos"], ["tratos", "tratos"], ["embajadas", "embassies"], ["titanium", "titanium (comercio)"],
     ["compras", "compras"], ["oportunidad", "de oportunidad"], ["festivales", "festivales"], ["praise", "Praise the sun"], ["cielo", "Observe the sky"]];
   function infoResumen() {
     var t = d.tot, partes = NOMBRES_TOT.filter(function (x) { return t[x[0]] > 0; }).map(function (x) { return "<b>" + num(t[x[0]]) + "</b> " + x[1]; });
@@ -1525,6 +1557,7 @@
     FUN.forEach(function (f) { h += '<label style="display:block"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>"; });
     h += "</details>";
     if (infoUnicornio) h += "<div style='margin-top:6px;font-size:11.5px'><b>Unicorns:</b> " + infoUnicornio + "</div>";
+    if (d.on.manuscript && d.culturaEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Culture:</b> " + d.culturaEstado + "</div>";
     if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → titanium:</b> " + d.oroEstado + "</div>";
     h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
     h += "<div style='margin-top:6px'><b>Resumen</b><div style='font-size:11.5px'>" + infoResumen() + "</div></div>";
