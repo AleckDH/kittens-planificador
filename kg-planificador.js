@@ -432,6 +432,10 @@
   function colPara(col, x, tope) { return Math.max(0, Math.min(col[x.name] || 0, (tope || Infinity) - x.val)); }
   // stock sin la reserva de insumos (lo que de verdad se puede usar)
   function sinCol(st, col) { var o = Object.assign({}, st); Object.keys(col || {}).forEach(function (r) { o[r] = Math.max(0, (o[r] || 0) - col[r]); }); return o; }
+  function colchonesBase() { // siempre, para lo que nunca debe dejar sin insumos a los Smelters (p. ej. hacer slabs para tratos)
+    var o = {}; game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > 0) o[r.name] = c * A.COLCHON_SEG; });
+    return o;
+  }
   function colchones() {
     var o = {}; if (!mantActivo()) return o;
     game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > 0) o[r.name] = c * A.COLCHON_SEG; });
@@ -1281,28 +1285,40 @@
   // ---------- gold lleno: el sobrante se cambia por titanium (así el gold no se pierde en el tope) ----------
   function oroATitanio(res) {
     var g = R("gold"), ti = R("titanium"), z = zebras();
-    if (!z || !g.maxValue || g.value < g.maxValue * A.ORO_TRATOS_PCT) return;
-    if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return; // el titanium también está lleno
+    var estado = function (txt) { d.oroEstado = txt; };
+    if (!z) return estado("todavía no puedes comerciar con las Zebras");
+    if (!g.maxValue || g.value < g.maxValue * A.ORO_TRATOS_PCT) return estado("esperando que el gold llegue al " + Math.round(A.ORO_TRATOS_PCT * 100) + " % (" + num(g.value) + " / " + num(g.maxValue) + ")");
+    if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return estado("el titanium está lleno");
     var n = Math.floor((g.value - Math.max(g.maxValue * A.ORO_DEJAR_PCT, res.gold || 0)) / z.gold);
-    // si faltan slabs (lo que piden las Zebras), los fabrica con su "cuenta aparte": lo que juntan los miners extra
-    // de mantenimiento para los tratos (el plan no los puede reservar); y si el plan no los necesita, con lo que sobre
+    if (n < 1) return estado("el plan necesita ese gold");
+    // catpower: cada trato pide z.catpower (los Mints también lo consumen)
+    var nCat = Math.floor((libre("manpower", res) - A.RESERVA_CAZA) / z.catpower);
+    if (nCat < 1) {
+      var mint = game.bld.get("mint"), cons = consumoPorSeg("manpower");
+      return estado("falta catpower: hay " + num(R("manpower").value) + ", cada trato pide " + z.catpower + " y se dejan " + A.RESERVA_CAZA +
+        (mint && mint.on ? " (tus " + mint.on + " Mints consumen " + num(cons) + "/s)" : "") + ". Hacen falta hunters.");
+    }
+    n = Math.min(n, nCat, game.diplomacy.getMaxTradeAmt(z.race) || n);
+    // slabs (lo que piden las Zebras): solo los de los tratos que se pueden hacer. Salen de la "cuenta aparte" de los
+    // miners de mantenimiento (modo edificios) o de lo que sobre; nunca de la reserva de Smelters/Calciner.
     var faltaS = n * z.compraVal - libre(z.compra, res), rc = rec(z.compra);
     if (faltaS > 0 && rc) {
-      var resS = Object.assign({}, res), col0 = colchones(), antes = {};
+      var resS = Object.assign({}, res), col0 = colchonesBase(), antes = {};
       Object.keys(rc.porVez).forEach(function (q) {
         antes[q] = R(q).value;
-        var usable = Math.max(0, Math.min((d.cuentaTratos || {})[q] || 0, R(q).value - (col0[q] || 0))); // la cuenta, sin tocar la reserva de insumos
-        resS[q] = Math.min(res[q] || 0, R(q).value - usable);
+        var usable = Math.max(0, Math.min((d.cuentaTratos || {})[q] || 0, R(q).value - (col0[q] || 0)));
+        resS[q] = Math.max(col0[q] || 0, Math.min(res[q] || 0, R(q).value - usable));
       });
       fabricar(z.compra, Math.ceil(faltaS / rc.rinde), resS);
       Object.keys(antes).forEach(function (q) { if (d.cuentaTratos && d.cuentaTratos[q]) d.cuentaTratos[q] = Math.max(0, d.cuentaTratos[q] - (antes[q] - R(q).value)); });
     }
-    n = Math.min(n, Math.floor(libre(z.compra, res) / z.compraVal), Math.floor((libre("manpower", res) - A.RESERVA_CAZA) / z.catpower),
-      game.diplomacy.getMaxTradeAmt(z.race) || 0);
-    if (!(n >= 1)) return;
+    var nSlab = Math.floor(libre(z.compra, res) / z.compraVal);
+    if (nSlab < 1) return estado("faltan " + titulo(z.compra) + " (" + z.compraVal + " por trato): " + (res.minerals > 0 ? "los minerals los necesita el plan o la reserva de los Smelters" : "no alcanzan los minerals"));
+    n = Math.min(n, nSlab);
     var t0 = ti.value;
     game.diplomacy.tradeMultiple(z.race, n);
     sumar("tratos", n); sumar("titanium", ti.value - t0);
+    estado("comerció " + n + " veces (" + hora() + ")");
     anotar("Gold casi lleno: " + n + " tratos con las Zebras → +" + num(ti.value - t0) + " titanium");
   }
 
@@ -1512,6 +1528,7 @@
     FUN.forEach(function (f) { h += '<label style="display:block"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>"; });
     h += "</details>";
     if (infoUnicornio) h += "<div style='margin-top:6px;font-size:11.5px'><b>Unicorns:</b> " + infoUnicornio + "</div>";
+    if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → titanium:</b> " + d.oroEstado + "</div>";
     h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
     h += "<div style='margin-top:6px'><b>Resumen</b><div style='font-size:11.5px'>" + infoResumen() + "</div></div>";
     h += "<div style='margin-top:6px'><b>Bitácora</b><div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 15).join("<br>") || "—") + "</div></div>";
