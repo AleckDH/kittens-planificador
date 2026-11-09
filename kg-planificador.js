@@ -1181,10 +1181,7 @@
     var res = reservas(), necesitaCaza = !!(res.furs || res.ivory || res.parchment || res.manuscript || res.compedium);
     var resF = Object.assign({}, res); resF.furs = (res.furs || 0) + A.RESERVA_FURS; // furs: siempre deja una reserva
     if (d.on.cielo && game.calendar.observeBtn) { var b = document.querySelector("#observeButton input"); if (b) b.click(); else game.calendar.observeHandler(); sumar("cielo", 1); }
-    if (d.on.refinar && lleno("catnip", 0.99)) {
-      var w = R("wood"), rinde = 1 + game.getResCraftRatio("wood");
-      fabricar("wood", w.maxValue ? Math.floor((w.maxValue - w.value) / rinde) : 100);
-    }
+    if (d.on.refinar && lleno("catnip", 0.99)) fabricar("wood", 5); // refina de a 5: el catnip queda cerca del 99 % (en invierno aguanta con lo guardado)
     var fest = d.on.festival ? festivalQuiere(res) : null;
     if (fest && fest.listo) festival(resF);
     var pasoTrato = d.ejecutando && d.plan && d.plan.pasos[0] && d.plan.pasos[0].type === "trade";
