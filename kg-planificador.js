@@ -30,7 +30,7 @@
   var d = (window.__kgPlan && window.__kgPlan.d) || null, retomar = null;
   if (!d) { // al recargar la página: recupera opciones, bitácora y el plan que iba
     d = {};
-    try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; d.modoEdificios = g.modoEdificios; d.historial = g.historial; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
+    try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; d.modoEdificios = g.modoEdificios; d.historial = g.historial; d.apagadosMano = g.apagados || {}; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
   }
   d.on = Object.assign({ cielo: true, refinar: true, cazar: true, manuscript: true, steel: true, bsp: true, fe: true, unicornios: true,
     festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true }, d.on || {}); // las opciones nuevas vienen encendidas
@@ -46,7 +46,7 @@
     try {
       localStorage.setItem(CLAVE, JSON.stringify({ on: d.on, log: d.log.slice(0, 40), tot: d.tot, totDesde: d.totDesde,
         meta: d.plan ? { type: d.plan.type, name: d.plan.name, auto: !!d.plan.auto, inicio: d.plan.inicio, estimado: d.plan.estimado, pausado: d.plan.pausado, pausaDesde: d.plan.pausaDesde, hechos: (d.plan.hechos || []).slice(-10) } : null,
-        ejecutando: d.ejecutando, pausa: d.pausa, modoEdificios: !!d.modoEdificios, historial: d.historial.slice(0, 10) }));
+        ejecutando: d.ejecutando, pausa: d.pausa, modoEdificios: !!d.modoEdificios, historial: d.historial.slice(0, 10), apagados: d.apagadosMano || {} }));
     } catch (e) {}
   }
   function esperar() { return new Promise(function (r) { setTimeout(r, 0); }); } // deja respirar al juego
@@ -442,9 +442,53 @@
     return o;
   }
   // edificios que gastan recursos y el juego apagó (p. ej. Magnetos sin oil): se vuelven a encender si hay insumos
+  // edificios que la usuaria apagó a mano: no se vuelven a encender y el plan se recalcula sin ellos
+  var onPrev = null;
+  function faltaInsumo(b) { // el juego los apaga solo cuando se acaba un insumo (p. ej. Magnetos sin oil)
+    var ef = b.effects || {};
+    return Object.keys(ef).some(function (k) {
+      if (!/PerTick(Con)?$/.test(k) || !(ef[k] < 0)) return false;
+      var r = R(k.replace(/PerTick(Con)?$/, ""));
+      return r && r.value < -ef[k] * Math.max(1, b.val) * tps() * 5;
+    });
+  }
+  function vigilarApagados() {
+    d.apagadosMano = d.apagadosMano || {};
+    var cambio = false, primera = !onPrev; onPrev = onPrev || {};
+    game.bld.buildingsData.forEach(function (b) {
+      if (typeof b.on !== "number") return;
+      var antes = onPrev[b.name]; onPrev[b.name] = { on: b.on, val: b.val };
+      var nom = etiqueta("buildings", b.name);
+      if (primera) { // al cargar: si ya hay apagados con insumos de sobra, los apagó ella
+        if (b.val && b.on < b.val && !faltaInsumo(b) && !d.apagadosMano[b.name]) { d.apagadosMano[b.name] = true; anotar("Dejo apagados los " + nom + " que están apagados"); }
+        return;
+      }
+      if (!antes || b.on === antes.on) return;
+      if (b.on < antes.on && !faltaInsumo(b)) {
+        d.apagadosMano[b.name] = true; cambio = true;
+        anotar("Apagaste " + (antes.on - b.on) + " " + nom + ": no lo vuelvo a encender y recalculo sin él");
+      } else if (d.apagadosMano[b.name] && b.on - antes.on > (b.val || 0) - (antes.val || 0)) { // lo encendió ella (no es solo uno nuevo)
+        delete d.apagadosMano[b.name]; cambio = true;
+        anotar("Encendiste " + nom + ": vuelvo a mantenerlo y recalculo");
+      }
+    });
+    if (cambio) { guardar(); recalcularPorApagado(); }
+  }
+  function recalcularPorApagado() {
+    ultimoReparto = -999;
+    if (!d.plan) { ultimaBusqueda = -999; return; }
+    if (d.plan.auto) { d.plan = null; ultimaBusqueda = -999; return; } // modo edificios: vuelve a elegir con lo que hay encendido
+    var P = d.plan, seguir = d.ejecutando, guardado = {};
+    ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (P[k] !== undefined) guardado[k] = P[k]; });
+    calcularYMostrar(P.type, P.name, {}).then(function () {
+      if (d.plan) { Object.assign(d.plan, guardado); d.ejecutando = seguir; guardar(); }
+      vista = pintarPlan(); pintar();
+    }).catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
+  }
   function encenderConsumidores() {
     game.bld.buildingsData.forEach(function (b) {
       if (!b.val || typeof b.on !== "number" || b.on >= b.val) return;
+      if ((d.apagadosMano || {})[b.name]) return; // lo apagó ella
       var ef = b.effects || {}, ins = Object.keys(ef).filter(function (k) { return /PerTick(Con)?$/.test(k) && ef[k] < 0; });
       if (!ins.length) return;
       var hay = ins.every(function (k) {
@@ -1180,6 +1224,7 @@
   function automaticos() {
     var res = reservas(), necesitaCaza = !!(res.furs || res.ivory || res.parchment || res.manuscript || res.compedium);
     var resF = Object.assign({}, res); resF.furs = (res.furs || 0) + A.RESERVA_FURS; // furs: siempre deja una reserva
+    vigilarApagados();
     if (d.on.cielo && game.calendar.observeBtn) { var b = document.querySelector("#observeButton input"); if (b) b.click(); else game.calendar.observeHandler(); sumar("cielo", 1); }
     if (d.on.refinar && lleno("catnip", 0.99)) fabricar("wood", 5); // refina de a 5: el catnip queda cerca del 99 % (en invierno aguanta con lo guardado)
     var fest = d.on.festival ? festivalQuiere(res) : null;
@@ -1557,6 +1602,8 @@
     FUN.forEach(function (f) { h += '<label style="display:block"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>"; });
     h += "</details>";
     if (infoUnicornio) h += "<div style='margin-top:6px;font-size:11.5px'><b>Unicorns:</b> " + infoUnicornio + "</div>";
+    var apag = Object.keys(d.apagadosMano || {});
+    if (apag.length) h += "<div style='margin-top:4px;font-size:11.5px'><b>Apagados por ti (no los enciendo):</b> " + apag.map(function (n) { return etiqueta("buildings", n); }).join(", ") + "</div>";
     if (d.on.manuscript && d.culturaEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Culture:</b> " + d.culturaEstado + "</div>";
     if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → titanium:</b> " + d.oroEstado + "</div>";
     h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
