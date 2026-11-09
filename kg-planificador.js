@@ -358,7 +358,7 @@
   function mantenimiento(M) {
     if (M.mant) return M.mant;
     var o = {};
-    if (d.on.escasos) {
+    if (mantActivo()) {
       var total = 0, tope = Math.floor(M.N * A.ESCASOS_MAX_PCT);
       // cuántos gatitos hacen falta para producir "nec" por segundo de cada recurso (con margen: los que quedan
       // en mantenimiento rinden menos que el promedio, porque el líder y los mejores van a la meta)
@@ -433,7 +433,7 @@
   // stock sin la reserva de insumos (lo que de verdad se puede usar)
   function sinCol(st, col) { var o = Object.assign({}, st); Object.keys(col || {}).forEach(function (r) { o[r] = Math.max(0, (o[r] || 0) - col[r]); }); return o; }
   function colchones() {
-    var o = {}; if (!d.on.escasos) return o;
+    var o = {}; if (!mantActivo()) return o;
     game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > 0) o[r.name] = c * A.COLCHON_SEG; });
     return o;
   }
@@ -536,7 +536,7 @@
     var k = 0, t = 0, limite = limiteSeg || A.HORAS_MAX * 3600, alloc = null, rates = null, etapas = [], ultPol = -1e9;
     var col = colchones(); // la compra deja la reserva de insumos de los edificios que consumen
     var hist = [], resRaw = null, kRes = -1;
-    var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value, ritmo: slabsParaTratos(M), cuenta: {} };
+    var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value, ritmo: mantActivo() ? slabsParaTratos(M) : {}, cuenta: {} };
     var hacer = function (n, cant, nivel, reserva) {
       if (cant <= 1e-9 || nivel > 6) return;
       var ins = insumo(n);
@@ -609,7 +609,7 @@
     // lo que dan los pasos que faltan (titanium de los tratos, barcos) no hace falta producirlo
     Object.keys(gana).forEach(function (r) { if (falta[r]) { falta[r] = Math.max(0, falta[r] - gana[r]); if (falta[r] <= 1e-9) delete falta[r]; } });
     // si los conversores no se mantienen solos, lo que sale de ellos se traduce en sus insumos
-    if (!d.on.escasos) pasarConversores(M, falta, st);
+    if (!mantActivo()) pasarConversores(M, falta, st);
     // ¿algo de un solo paso no cabe en el tope?
     var noCabe = {};
     resto.forEach(function (it) { it.p.forEach(function (x) { if (isFinite(cap[x.name]) && x.val + colPara(col, x, Infinity) > cap[x.name] + 1e-6) noCabe[x.name] = true; }); });
@@ -825,7 +825,7 @@
   // =================== QUE NO SE ACABE NADA ===================
   // ¿el edificio consume algo que no depende de gatitos y ya va bajando (o quedaría bajando)?
   function consumeSinSostener(b, M) {
-    if (!d.on.escasos) return false;
+    if (!mantActivo()) return false;
     var ef = b.effects || {};
     return Object.keys(ef).some(function (k) {
       if (!/PerTick(Con)?$/.test(k) || !(ef[k] < 0)) return false;
@@ -837,7 +837,7 @@
   // Recursos que tus edificios consumen, que no dependen de gatitos y que van bajando (p. ej. oil con Magnetos
   // y Calciners): agrega al principio del plan los edificios que más los suben por lo que cuestan (Oil Wells).
   function planSostener(M) {
-    var pasos = []; if (!d.on.escasos) return pasos;
+    var pasos = []; if (!mantActivo()) return pasos;
     game.resPool.resources.forEach(function (res) {
       var r = res.name, cons = consumoPorSeg(r); if (!(cons > 0)) return;
       if (mejorJob(M, r)) return; // de esos se encargan los gatitos de mantenimiento
@@ -900,8 +900,13 @@
   }
 
   // =================== CALCULAR EL PLAN ===================
+  // el mantenimiento (gatitos para los insumos, reserva, Oil Wells, slabs para los tratos) solo va en el modo edificios;
+  // con una meta elegida por la usuaria, todos los gatitos van a la meta
+  var enCalculo = null;
+  function mantActivo() { return !!d.on.escasos && (enCalculo !== null ? enCalculo : (d.plan ? !!d.plan.auto : !!d.modoEdificios)); }
   async function calcularPlan(type, name, opts) {
-    var P = await calcularPlan0(type, name); P.auto = !!(opts && opts.auto); return P;
+    enCalculo = !!(opts && opts.auto);
+    try { var P = await calcularPlan0(type, name); P.auto = enCalculo; return P; } finally { enCalculo = null; }
   }
   async function calcularPlan0(type, name) {
     RECETAS = {};
@@ -995,7 +1000,7 @@
   }
   function aplicarReparto() {
     if (!d.plan || !d.plan.pasos.length) return;
-    var M = medirSeguro(); if (d.on.escasos) ajustarMantenimiento(M); // mira cómo vienen los insumos con el reparto que había
+    var M = medirSeguro(); if (mantActivo()) ajustarMantenimiento(M); // mira cómo vienen los insumos con el reparto que había
     d.ritmoTratos = slabsParaTratos(M); // lo que se junta por segundo para los slabs de los tratos
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual); // en un trato, p incluye los furs que cuesta su catpower
@@ -1179,7 +1184,7 @@
     var fest = d.on.festival ? festivalQuiere(res) : null;
     if (fest && fest.listo) festival(resF);
     var pasoTrato = d.ejecutando && d.plan && d.plan.pasos[0] && d.plan.pasos[0].type === "trade";
-    if (d.on.oroTitanio && d.on.escasos && d.ritmoTratos) { // la cuenta aparte crece con lo que juntan los miners extra (hasta 1 h)
+    if (d.on.oroTitanio && mantActivo() && d.ritmoTratos) { // la cuenta aparte crece con lo que juntan los miners extra (hasta 1 h)
       d.cuentaTratos = d.cuentaTratos || {};
       Object.keys(d.ritmoTratos).forEach(function (q) { d.cuentaTratos[q] = Math.min(d.ritmoTratos[q] * 3600, (d.cuentaTratos[q] || 0) + d.ritmoTratos[q]); });
     }
@@ -1401,7 +1406,7 @@
   var FUN = [["cielo", "Observe the sky"], ["refinar", "Refinar catnip lleno"], ["cazar", "Cazar"], ["manuscript", "Manuscripts (culture " + Math.round(A.CULTURA_PCT * 100) + "%)"],
     ["steel", "Steel cada " + A.STEEL_CADA_SEG + " s"], ["bsp", "Beam/slab/plate al llenarse"], ["fe", "Gastar la fe"], ["unicornios", "Invertir unicorns"],
     ["festival", "Festivales (desde Drama)"], ["oportunidad", "Compras de oportunidad (mejoras del workshop con lo que sobra)"],
-    ["escasos", "Mantener andando los edificios que consumen (Smelters, Calciner, Mints, Magnetos…): gatitos para sus insumos, reserva de " + Math.round(A.COLCHON_SEG / 60) + " min de consumo y volver a encenderlos"],
+    ["escasos", "En el modo edificios: mantener andando los que consumen (Smelters, Calciner, Mints, Magnetos…): gatitos para sus insumos, reserva de " + Math.round(A.COLCHON_SEG / 60) + " min de consumo, Oil Wells si baja el oil y slabs para los tratos"],
     ["oroTitanio", "Gold casi lleno → cambiar el sobrante por titanium con las Zebras"],
     ["edificios", "Al terminar la meta, seguir comprando edificios (el que tarde menos, sin frenar Smelters, Calciner, Mints ni Magnetos)"]];
   function nombresConv(M) { return M.conv.map(function (c) { return etiqueta("buildings", c.nombre); }).join(", ") || "los conversores"; }
