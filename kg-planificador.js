@@ -328,12 +328,48 @@
     });
     return falta;
   }
+  // lo que se comen por segundo los edificios encendidos que consumen (Smelters: wood y minerals, Calciner, Mints, Brewery…)
+  function consumoConv(M) {
+    var c = {};
+    (M.conv || []).forEach(function (x) { Object.keys(x.ins).forEach(function (r) { c[r] = (c[r] || 0) + x.ins[r]; }); });
+    return c;
+  }
+  // mientras se junta un recurso, los otros se siguen consumiendo (p. ej. los Smelters se comen la wood mientras
+  // todos están de miners): a cada recurso consumido le suma lo que se gasta durante las etapas de los demás
+  function conConsumo(M, falta, cons, stc, preciosLista) {
+    var N = M.N, extra = {}, rs = Object.keys(cons);
+    if (!rs.length) return falta;
+    var bruto = faltante({}, preciosLista); // lo que pide la compra, sin contar lo que ya hay
+    for (var it = 0; it < 3; it++) {
+      var tJob = {}, T = 0, ok = true;
+      Object.keys(falta).concat(rs).forEach(function (r) {
+        var f = (falta[r] || 0) + (extra[r] || 0); if (!(f > 0)) return;
+        var j = mejorJob(M, r); if (!j) return;
+        var neto = (M.base[r] || 0) + M.m[j][r] * N - (cons[r] || 0);
+        if (!(neto > 0)) { ok = false; return; }
+        tJob[j] = Math.max(tJob[j] || 0, f / neto);
+      });
+      if (!ok) break;
+      Object.keys(tJob).forEach(function (j) { T += tJob[j]; });
+      rs.forEach(function (r) {
+        if (!bruto[r] && !falta[r]) return; // la compra no lo usa
+        var j = mejorJob(M, r), gasta = cons[r] * Math.max(0, T - (j ? tJob[j] || 0 : 0));
+        var sobra = falta[r] > 0 ? 0 : Math.max(0, (stc[r] || 0) - (bruto[r] || 0));
+        extra[r] = Math.max(0, gasta - sobra);
+      });
+    }
+    var o = Object.assign({}, falta);
+    Object.keys(extra).forEach(function (r) { if (extra[r] > 0) o[r] = (o[r] || 0) + extra[r]; });
+    return o;
+  }
   function politica(M, st, preciosLista, jobActual) {
     var stc = sinCol(st, colchones()); // la reserva de insumos no cuenta como disponible
     var falta = pasarConversores(M, faltante(stc, preciosLista), stc), peor = null, pt = -1, N = M.N, porJob = {}, recJob = {};
+    var cons = consumoConv(M);
+    falta = conConsumo(M, falta, cons, stc, preciosLista);
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r); if (!j) return;
-      var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N);
+      var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N - (cons[r] || 0));
       // un recurso lleno que todavía "falta" (no se puede fabricar con él por ahora) no sirve para seguir en ese oficio
       var tope = R(r) && R(r).maxValue, lleno = tope > 0 && (st[r] || 0) >= tope * 0.99;
       if (!lleno && v > (porJob[j] || 0)) { porJob[j] = v; recJob[j] = r; }
