@@ -14,6 +14,8 @@
     ESCASOS: ["gold", "titanium"], // se siguen produciendo aunque la meta no los necesite
     ESCASOS_MAX_PCT: 0.4,  // como mucho este % de los gatitos libres se dedica a mantener los edificios que consumen
     COLCHON_SEG: 120,      // insumos que se guardan para los edificios que consumen: este tiempo de consumo
+    MANT_MARGEN: 1.15,     // margen al calcular los gatitos de mantenimiento (los que quedan rinden menos que el promedio)
+    SOSTENER_MAX: 10,      // como mucho tantos edificios por recurso para que no se acabe (p. ej. Oil Wells)
     ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por titanium
     ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
@@ -357,27 +359,73 @@
     if (M.mant) return M.mant;
     var o = {};
     if (d.on.escasos) {
+      var total = 0, tope = Math.floor(M.N * A.ESCASOS_MAX_PCT);
+      // cuántos gatitos hacen falta para producir "nec" por segundo de cada recurso (con margen: los que quedan
+      // en mantenimiento rinden menos que el promedio, porque el líder y los mejores van a la meta)
+      var gatitos = function (nec, conExtra) {
+        var out = [];
+        Object.keys(nec).forEach(function (q) {
+          var j, por;
+          if (q === "manpower") { // los hunters: su catpower sin contar lo que se caza
+            j = Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0]; por = j ? M.mpCrudo[j] : 0;
+          } else { j = mejorJob(M, q); por = j ? M.m[j][q] : 0; }
+          if (!j || !(por > 0)) return; // oil, gold…: no dependen de gatitos (para eso está la reserva y "sostener")
+          var k = Math.ceil(Math.max(0, nec[q] * A.MANT_MARGEN - (conExtra ? (M.base[q] || 0) : 0)) / por) + (conExtra ? ((d.mantExtra || {})[j + "|" + q] || 0) : 0);
+          if (k > 0) out.push({ j: j, k: k });
+        });
+        return out;
+      };
+      // 1.º: los insumos de todos los edificios que consumen (Smelters, Calciner, Mints…), con el consumo total que da el juego
       var nec = {};
       M.conv.forEach(function (c) { Object.keys(c.ins).forEach(function (q) { nec[q] = (nec[q] || 0) + c.ins[q]; }); });
-      var total = 0, tope = Math.floor(M.N * A.ESCASOS_MAX_PCT);
-      Object.keys(nec).forEach(function (q) {
-        var j, por;
-        if (q === "manpower") { // los hunters: su catpower sin contar lo que se caza
-          j = Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0]; por = j ? M.mpCrudo[j] : 0;
-        } else { j = mejorJob(M, q); por = j ? M.m[j][q] : 0; }
-        if (!j || !(por > 0)) return; // oil, gold…: no dependen de gatitos (para eso está la reserva)
-        var k = Math.ceil(Math.max(0, nec[q] - (M.base[q] || 0)) / por);
-        k = Math.min(k, tope - total); if (k <= 0) return;
-        o[j] = (o[j] || 0) + k; total += k;
-      });
+      game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > (nec[r.name] || 0)) nec[r.name] = c; });
+      gatitos(nec, true).forEach(function (x) { var k = Math.min(x.k, tope - total); if (k > 0) { o[x.j] = (o[x.j] || 0) + k; total += k; } });
+      // 2.º: lo que piden los tratos gold → titanium (minerals para los slabs y catpower); si no entra todo, en proporción
+      var tr = gatitos(slabsParaTratos(M), false), pide = tr.reduce(function (s, x) { return s + x.k; }, 0), queda = tope - total;
+      if (pide > 0 && queda > 0) {
+        var f = Math.min(1, queda / pide);
+        tr.forEach(function (x) { var k = Math.max(1, Math.floor(x.k * f)); k = Math.min(k, tope - total); if (k > 0) { o[x.j] = (o[x.j] || 0) + k; total += k; } });
+      }
     }
     return (M.mant = o);
   }
+  // insumos por segundo para hacer los slabs que piden los tratos con el gold que se produce
+  function slabsParaTratos(M) {
+    var o = {}; if (!d.on.oroTitanio) return o;
+    var z = zebras(); if (!z || !rec(z.compra)) return o;
+    var ti = R("titanium"); if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return o;
+    var oro = (M.base.gold || 0); M.conv.forEach(function (c) { oro += c.outs.gold || 0; });
+    if (!(oro > 0)) return o;
+    var porSeg = oro / z.gold * z.compraVal, ins = insumo(z.compra); // slabs por segundo y lo que lleva cada uno
+    Object.keys(ins).forEach(function (q) { if (!esFab(q)) o[q] = ins[q] * porSeg; });
+    o.manpower = (o.manpower || 0) + oro / z.gold * z.catpower; // y el catpower de cada trato (hunters)
+    return o;
+  }
+  // ajuste con la realidad: si un insumo de mantenimiento igual baja, un gatito más a ese oficio (y uno menos si sobra mucho)
+  function ajustarMantenimiento(M) {
+    d.mantExtra = d.mantExtra || {};
+    var nec = {};
+    M.conv.forEach(function (c) { Object.keys(c.ins).forEach(function (q) { nec[q] = (nec[q] || 0) + c.ins[q]; }); });
+    game.resPool.resources.forEach(function (r) { var c = consumoPorSeg(r.name); if (c > (nec[r.name] || 0)) nec[r.name] = c; });
+    Object.keys(nec).forEach(function (q) {
+      var j = q === "manpower" ? Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0] : mejorJob(M, q); if (!j) return;
+      var r = R(q), neto = (game.getResourcePerTick(q, true) || 0) * tps(), clave = j + "|" + q, ex = d.mantExtra[clave] || 0;
+      if (neto < 0 && !(r.maxValue && r.value >= r.maxValue * 0.98)) d.mantExtra[clave] = Math.min(ex + 1, 15);
+      else if (ex > 0 && neto > nec[q] * 0.25) d.mantExtra[clave] = ex - 1;
+    });
+  }
   // cuánto consumen por segundo los edificios encendidos (Con = conversores; PerTick negativo = Magneto con el oil)
+  // Consumo por edificio que el juego recalcula según lo que hay (js/buildings.js, "action"): si el insumo se acabó,
+  // el juego informa 0, pero el edificio lo consume apenas aparece. Para eso se usa el consumo completo.
+  var CONSUMO_BASE = { mint: { manpower: 0.75, gold: 0.005 } };
   function consumoPorSeg(r) {
-    var c = -Math.min(0, game.getEffect(r + "PerTickCon") || 0);
-    game.bld.buildingsData.forEach(function (b) { var v = (b.effects || {})[r + "PerTick"]; if (v < 0 && b.on) c += -v * b.on; });
-    return c * tps();
+    var c = -Math.min(0, game.getEffect(r + "PerTickCon") || 0), extra = 0;
+    game.bld.buildingsData.forEach(function (b) {
+      var v = (b.effects || {})[r + "PerTick"]; if (v < 0 && b.on) c += -v * b.on;
+      var base = (CONSUMO_BASE[b.name] || {})[r];
+      if (base && b.on) extra += Math.max(0, base * b.on + Math.min(0, (b.effects || {})[r + "PerTickCon"] || 0)); // lo que le falta para el consumo completo
+    });
+    return (c + extra) * tps();
   }
   // reserva de insumos que nadie gasta, para que esos edificios no se queden sin nada y se apaguen
   // la reserva nunca impide una compra que llena justo el tope
@@ -432,6 +480,7 @@
   }
   // lo que gastan los automáticos mientras corre el plan (para que la simulación se parezca a la realidad)
   function automaticosSim(st, cap, net, sobra, dt, resRaw, col, t, est) {
+    Object.keys(est.ritmo || {}).forEach(function (q) { est.cuenta[q] = Math.min(est.ritmo[q] * 3600, (est.cuenta[q] || 0) + est.ritmo[q] * dt); });
     var libreS = function (r) { return (st[r] || 0) - (resRaw[r] || 0) - (col[r] || 0); };
     // beam/slab/plate con lo que se desborda (el automático hace 1 fabricación por segundo)
     if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"]].forEach(function (x) {
@@ -464,8 +513,17 @@
         !(isFinite(cap.titanium) && (st.titanium || 0) >= cap.titanium * 0.98)) {
       var z = est.z, fursTrato = z.catpower / est.cz.costo * est.cz.furs;
       var n = Math.floor(((st.gold || 0) - Math.max(cap.gold * A.ORO_DEJAR_PCT, (resRaw.gold || 0) + (col.gold || 0))) / z.gold);
-      n = Math.min(n, Math.floor(Math.max(0, libreS(z.compra)) / z.compraVal), Math.floor(Math.max(0, libreS("furs") - A.RESERVA_FURS) / fursTrato));
+      // los slabs que falten se fabrican con lo que sobra (igual que en el juego)
+      var insC = rec(z.compra) ? insumo(z.compra) : null, porFab = Infinity;
+      // para los slabs vale la "cuenta aparte" de los miners extra, aunque el plan reserve esos minerals
+      var libreT = function (q) { return (st[q] || 0) - (col[q] || 0) - Math.max(0, (resRaw[q] || 0) - (est.cuenta[q] || 0)); };
+      if (insC) Object.keys(insC).forEach(function (q) { porFab = Math.min(porFab, Math.max(0, libreT(q)) / insC[q]); });
+      if (!isFinite(porFab)) porFab = 0;
+      var slabsDisp = Math.max(0, libreS(z.compra)) + porFab;
+      n = Math.min(n, Math.floor(slabsDisp / z.compraVal), Math.floor(Math.max(0, libreS("furs") - A.RESERVA_FURS) / fursTrato));
       if (n >= 1) {
+        var hacerS = Math.max(0, n * z.compraVal - Math.max(0, libreS(z.compra)));
+        if (hacerS > 0 && insC) { Object.keys(insC).forEach(function (q) { st[q] -= insC[q] * hacerS; est.cuenta[q] = Math.max(0, (est.cuenta[q] || 0) - insC[q] * hacerS); }); st[z.compra] = (st[z.compra] || 0) + hacerS; }
         st.gold -= n * z.gold; st[z.compra] -= n * z.compraVal; st.furs -= n * fursTrato;
         st.titanium = Math.min(isFinite(cap.titanium) ? cap.titanium : Infinity, (st.titanium || 0) + n * z.ti);
       }
@@ -478,7 +536,7 @@
     var k = 0, t = 0, limite = limiteSeg || A.HORAS_MAX * 3600, alloc = null, rates = null, etapas = [], ultPol = -1e9;
     var col = colchones(); // la compra deja la reserva de insumos de los edificios que consumen
     var hist = [], resRaw = null, kRes = -1;
-    var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value };
+    var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value, ritmo: slabsParaTratos(M), cuenta: {} };
     var hacer = function (n, cant, nivel, reserva) {
       if (cant <= 1e-9 || nivel > 6) return;
       var ins = insumo(n);
@@ -695,7 +753,7 @@
       conVarios(nombres(), function () {
         var baseRates = prodActual();
         game.bld.buildingsData.forEach(function (b) {
-          if (!b.unlocked) return;
+          if (!b.unlocked || consumeSinSostener(b, M0)) return; // p. ej. un Magneto más con el oil bajando
           var p = game.bld.getPrices(b.name, elegidos.filter(function (e) { return e.name === b.name; }).length);
           if (game.resPool.isStorageLimited(p)) return; // no cabe en tu almacenamiento (función del juego)
           var delta;
@@ -764,6 +822,47 @@
     return mejor;
   }
 
+  // =================== QUE NO SE ACABE NADA ===================
+  // ¿el edificio consume algo que no depende de gatitos y ya va bajando (o quedaría bajando)?
+  function consumeSinSostener(b, M) {
+    if (!d.on.escasos) return false;
+    var ef = b.effects || {};
+    return Object.keys(ef).some(function (k) {
+      if (!/PerTick(Con)?$/.test(k) || !(ef[k] < 0)) return false;
+      var r = k.replace(/PerTick(Con)?$/, ""); if (mejorJob(M, r)) return false;
+      var neto = (game.getResourcePerTick(r, true) || 0) * tps();
+      return neto + ef[k] * tps() < 0; // con uno más, quedaría en negativo
+    });
+  }
+  // Recursos que tus edificios consumen, que no dependen de gatitos y que van bajando (p. ej. oil con Magnetos
+  // y Calciners): agrega al principio del plan los edificios que más los suben por lo que cuestan (Oil Wells).
+  function planSostener(M) {
+    var pasos = []; if (!d.on.escasos) return pasos;
+    game.resPool.resources.forEach(function (res) {
+      var r = res.name, cons = consumoPorSeg(r); if (!(cons > 0)) return;
+      if (mejorJob(M, r)) return; // de esos se encargan los gatitos de mantenimiento
+      var neto = (game.getResourcePerTick(r, true) || 0) * tps(); if (neto >= 0) return;
+      var mejor = null;
+      game.bld.buildingsData.forEach(function (b) {
+        if (!b.unlocked) return;
+        var p = game.bld.getPrices(b.name); if (!p.length || game.resPool.isStorageLimited(p)) return;
+        var sube;
+        try { sube = conEdificio(b.name, function () { return (game.getResourcePerTick(r, true) || 0) * tps(); }) - neto; } catch (e) { return; }
+        if (!(sube > 1e-6)) return;
+        var costo = 1 + p.reduce(function (s, x) { var rr = R(x.name); return s + x.val / Math.max(1, rr.maxValue || rr.value || 1); }, 0);
+        if (!mejor || sube / costo > mejor.v) mejor = { name: b.name, sube: sube, v: sube / costo };
+      });
+      if (!mejor) return;
+      var n = Math.min(A.SOSTENER_MAX, Math.ceil(-neto / mejor.sube));
+      for (var i = 0; i < n; i++) {
+        var p = game.bld.getPrices(mejor.name, i); if (game.resPool.isStorageLimited(p)) break;
+        pasos.push({ type: "buildings", name: mejor.name, p: p, motivo: "sostener", recurso: r });
+      }
+      anotar("Sostener: " + titulo(r) + " baja " + num(-neto) + "/s → " + n + " " + etiqueta("buildings", mejor.name) + " (+" + num(mejor.sube) + "/s c/u)");
+    });
+    return pasos;
+  }
+
   // =================== MODO EDIFICIOS (después de la meta) ===================
   // candidatos: edificios desbloqueados que caben en el almacenamiento, ordenados por cuánto tardan
   async function rankingEdificios() {
@@ -811,6 +910,8 @@
     await esperar();
     var pMeta = precios(type, name);
     var alm = await planAlmacen(M, pMeta);
+    // primero: edificios para que no se acabe lo que consumen tus edificios y no depende de gatitos (oil → Oil Wells)
+    var sost = planSostener(M), nSost = sost.length; alm.pasos = sost.concat(alm.pasos);
     // titanium: lo que falta se consigue comerciando con las Zebras
     var stock0 = {}; game.resPool.resources.forEach(function (r) { stock0[r.name] = r.value; });
     var faltaTi = faltante(stock0, alm.pasos.map(function (s) { return s.p; }).concat([pMeta])).titanium || 0;
@@ -827,11 +928,11 @@
         .concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
     }
     var ayudas = await planAyudas(M, items, tAhora);
-    // mismo orden que la simulación: primero las ayudas, después almacenamiento, barcos, tratos y la meta
-    var pasos = ayudas.concat(alm.pasos).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
+    // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
+    var pasos = alm.pasos.slice(0, nSost).concat(ayudas).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
     // simulación final con todo
-    var itemsF = ayudas.map(function (a) { return { p: a.p, M: a.M }; }).concat(items);
-    var fin = (ayudas.length || barcos) ? simular(M, itemsF) : base;
+    var itemsF = items.slice(0, nSost).concat(ayudas.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
+    var fin = (ayudas.length || barcos || nSost) ? simular(M, itemsF) : base;
     // tiempos por recurso (con todos los libres en su mejor oficio)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var falta = faltante(stock, pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; })), porRec = [];
@@ -894,7 +995,8 @@
   }
   function aplicarReparto() {
     if (!d.plan || !d.plan.pasos.length) return;
-    var M = medirSeguro();
+    var M = medirSeguro(); if (d.on.escasos) ajustarMantenimiento(M); // mira cómo vienen los insumos con el reparto que había
+    d.ritmoTratos = slabsParaTratos(M); // lo que se junta por segundo para los slabs de los tratos
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual); // en un trato, p incluye los furs que cuesta su catpower
     d.etapaActual = ultimaEtapa ? Object.assign({}, ultimaEtapa) : null; // para mostrar qué se está juntando
@@ -963,6 +1065,7 @@
     }
     return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
       (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
+      (p.motivo === "sostener" ? " <span style='color:#e0b050'>(para no quedarte sin " + titulo(p.recurso) + ")</span>" : "") +
       (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(ahorra " + textoAhorro(p.ahorro) + ")</span>" : "");
   }
   function terminarPaso() {
@@ -1076,10 +1179,16 @@
     var fest = d.on.festival ? festivalQuiere(res) : null;
     if (fest && fest.listo) festival(resF);
     var pasoTrato = d.ejecutando && d.plan && d.plan.pasos[0] && d.plan.pasos[0].type === "trade";
+    if (d.on.oroTitanio && d.on.escasos && d.ritmoTratos) { // la cuenta aparte crece con lo que juntan los miners extra (hasta 1 h)
+      d.cuentaTratos = d.cuentaTratos || {};
+      Object.keys(d.ritmoTratos).forEach(function (q) { d.cuentaTratos[q] = Math.min(d.ritmoTratos[q] * 3600, (d.cuentaTratos[q] || 0) + d.ritmoTratos[q]); });
+    }
     if (d.on.oroTitanio && !pasoTrato) oroATitanio(res); // antes de cazar, para que quede catpower
     if (d.on.cazar && (lleno("manpower", 0.99) || (necesitaCaza && d.ejecutando))) {
       var reservaCaza = A.RESERVA_CAZA + (pasoTrato ? (zebras() || { catpower: 50 }).catpower * Math.min(d.plan.pasos[0].k, 50) : 0);
       if (fest) reservaCaza = Math.max(reservaCaza, FESTIVAL.manpower); // guarda el catpower del festival
+      var zt = d.on.oroTitanio ? zebras() : null, gt = R("gold");
+      if (zt && gt.maxValue && gt.value >= gt.maxValue * 0.9) reservaCaza = Math.max(reservaCaza, A.RESERVA_CAZA + 20 * zt.catpower + ((res || {}).manpower || 0)); // catpower para los tratos gold → titanium
       var cz = caza(), grupos = Math.floor((R("manpower").value - reservaCaza) / cz.costo);
       if (grupos >= 1) {
         var f0 = R("furs").value, i0 = R("ivory").value;
@@ -1170,6 +1279,19 @@
     if (!z || !g.maxValue || g.value < g.maxValue * A.ORO_TRATOS_PCT) return;
     if (ti.maxValue && ti.value >= ti.maxValue * 0.98) return; // el titanium también está lleno
     var n = Math.floor((g.value - Math.max(g.maxValue * A.ORO_DEJAR_PCT, res.gold || 0)) / z.gold);
+    // si faltan slabs (lo que piden las Zebras), los fabrica con su "cuenta aparte": lo que juntan los miners extra
+    // de mantenimiento para los tratos (el plan no los puede reservar); y si el plan no los necesita, con lo que sobre
+    var faltaS = n * z.compraVal - libre(z.compra, res), rc = rec(z.compra);
+    if (faltaS > 0 && rc) {
+      var resS = Object.assign({}, res), col0 = colchones(), antes = {};
+      Object.keys(rc.porVez).forEach(function (q) {
+        antes[q] = R(q).value;
+        var usable = Math.max(0, Math.min((d.cuentaTratos || {})[q] || 0, R(q).value - (col0[q] || 0))); // la cuenta, sin tocar la reserva de insumos
+        resS[q] = Math.min(res[q] || 0, R(q).value - usable);
+      });
+      fabricar(z.compra, Math.ceil(faltaS / rc.rinde), resS);
+      Object.keys(antes).forEach(function (q) { if (d.cuentaTratos && d.cuentaTratos[q]) d.cuentaTratos[q] = Math.max(0, d.cuentaTratos[q] - (antes[q] - R(q).value)); });
+    }
     n = Math.min(n, Math.floor(libre(z.compra, res) / z.compraVal), Math.floor((libre("manpower", res) - A.RESERVA_CAZA) / z.catpower),
       game.diplomacy.getMaxTradeAmt(z.race) || 0);
     if (!(n >= 1)) return;
