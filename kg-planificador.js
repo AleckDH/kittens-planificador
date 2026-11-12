@@ -21,7 +21,8 @@
     ORO_RENTABLE_PCT: 0.8, // tratos rentables (idea de Kitten Scientists): solo con el gold por encima de este % del tope
     FABRICAR_PCT: 0.05,    // beam/slab/plate al llenarse: cada segundo usa este % del material
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
-    EDIFICIOS_EXCLUIR: ["unicornPasture"] // la Unicorn Pasture la decide "Invertir unicorns"
+    EDIFICIOS_EXCLUIR: ["unicornPasture"], // la Unicorn Pasture la decide "Invertir unicorns"
+    EDIFICIOS_SIN: ["titanium"] // el modo edificios no compra edificios que piden esto (directo o fabricado: alloy…); queda para las mejoras
   };
   // ======================================================
   function tps() { return game.getTicksPerSecondUI ? game.getTicksPerSecondUI() : (game.ticksPerSecond || 5); } // velocidad real (con aceleración)
@@ -950,12 +951,18 @@
   }
 
   // =================== MODO EDIFICIOS (después de la meta) ===================
+  // ¿el precio pide algo escaso (titanium), directo o dentro de algo fabricado (alloy = steel + titanium)?
+  function usaEscasos(precio) {
+    var bruto = faltante({}, [precio]);
+    return A.EDIFICIOS_SIN.some(function (r) { return bruto[r] > 0 || precio.some(function (x) { return x.name === r; }); });
+  }
   // candidatos: edificios desbloqueados que caben en el almacenamiento, ordenados por cuánto tardan
   async function rankingEdificios() {
     var M = medirSeguro(), lista = [];
     await esperar();
     var cands = game.bld.buildingsData.filter(function (b) {
       if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0 || consumeSinSostener(b, M)) return false; // p. ej. un Magneto con el oil bajando
+      if (usaEscasos(game.bld.getPrices(b.name))) return false; // p. ej. Mansion: el titanium queda para las mejoras
       var meta = game.bld.getBuildingExt(b.name).meta;
       if (meta.limitBuild && meta.val >= meta.limitBuild) return false;
       var p = game.bld.getPrices(b.name);
