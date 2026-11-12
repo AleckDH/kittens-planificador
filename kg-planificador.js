@@ -19,6 +19,7 @@
     ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por lo que falte (o titanium)
     ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
     ORO_RENTABLE_PCT: 0.8, // tratos rentables (idea de Kitten Scientists): solo con el gold por encima de este % del tope
+    AYUDA_MIN_PCT: 0.03,   // un edificio que ayuda debe ahorrar al menos 1 min y este % del tiempo total
     FABRICAR_PCT: 0.05,    // beam/slab/plate al llenarse: cada segundo usa este % del material
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
     EDIFICIOS_EXCLUIR: ["unicornPasture"], // la Unicorn Pasture la decide "Invertir unicorns"
@@ -846,8 +847,11 @@
           var delta;
           try { delta = conEdificio(b.name, function () { var o = prodActual(); var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
           // sirve si sube la producción de algo necesario (o lo potencia aunque hoy nadie trabaje en eso)
-          var gana = nec.some(function (r) { return delta[r] > 1e-9; }) ||
-            Object.keys(b.effects || {}).some(function (k) { return !/Max$/.test(k) && nec.some(function (r) { return k.indexOf(r) === 0 && (b.effects[k] || 0) > 0; }); });
+          var ef = b.effects || {};
+          var directo = Object.keys(ef).some(function (k) { return !/Max$/.test(k) && nec.some(function (r) { return k.indexOf(r) === 0 && (ef[k] || 0) > 0; }); });
+          // si lo único que sube es la felicidad (Temple, Amphitheatre…), no cuenta: sube todo un poquito, pero gasta gold, manuscripts…
+          if (!directo && ef.happiness > 0) return;
+          var gana = directo || nec.some(function (r) { return delta[r] > 1e-9; });
           if (gana) cand.push({ name: b.name, p: p, delta: delta });
         });
       });
@@ -870,7 +874,7 @@
         try { M2 = conVarios(nombres().concat([c.name]), function () { return medir(M0.nFijos); }); } catch (e) { continue; }
         var r = simular(M0, itemsElegidos().concat([{ p: c.p, M: M2 }]).concat(items));
         var tr = tcomp(r), ahorro = tBase - tr;
-        if (ahorro > 60 && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr };
+        if (ahorro > Math.max(60, isFinite(tBase) ? tBase * A.AYUDA_MIN_PCT : 0) && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr };
         await esperar();
       }
       if (!mejor) break;
