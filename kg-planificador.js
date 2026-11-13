@@ -570,11 +570,11 @@
   function automaticosSim(st, cap, net, sobra, dt, resRaw, col, t, est) {
     Object.keys(est.ritmo || {}).forEach(function (q) { est.cuenta[q] = Math.min(est.ritmo[q] * 3600, (est.cuenta[q] || 0) + est.ritmo[q] * dt); });
     var libreS = function (r) { return (st[r] || 0) - (resRaw[r] || 0) - (col[r] || 0); };
-    // beam/slab/plate con lo que se desborda (el automático hace 1 fabricación por segundo)
+    // beam/slab/plate con lo que se desborda (el automático usa hasta el 5 % del material por segundo)
     if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"]].forEach(function (x) {
       var r = x[0], prod = x[1], rc = rec(prod); if (!(sobra[r] > 0) || !rc) return;
       var porVez = rc.porVez[r] || 0; if (!porVez) return;
-      var usa = Math.min(sobra[r], porVez) * dt; // como mucho una fabricación por segundo
+      var usa = Math.min(sobra[r], (st[r] || 0) * A.FABRICAR_PCT) * dt;
       st[prod] = (st[prod] || 0) + usa / porVez * rc.rinde;
     });
     // steel cada 60 s con el coal y el iron que el plan no necesita
@@ -746,7 +746,7 @@
     var fh = factorHistorial(), t = tcomp(sim); if (!fh || !isFinite(t) || Math.abs(fh.f - 1) < 0.05) return "";
     return " <span style='color:#9aa3b2'>(según tus últimas " + fh.n + " metas, más bien ~" + tiempo(t * fh.f) + ")</span>";
   }
-  function textoAhorro(x) { return isFinite(x) ? tiempo(x) : "la hace posible"; }
+  function textoAhorro(x) { return isFinite(x) ? "ahorra " + tiempo(x) : "sin esto no se llega"; }
 
   // =================== ALMACENAMIENTO Y EDIFICIOS ===================
   function refrescar(meta) { game.updateCaches(); if (meta && meta.calculateEffects) meta.calculateEffects(meta, game); game.updateCaches(); }
@@ -801,27 +801,33 @@
     });
     await esperar();
     if (!cand.length) return { pasos: [], extra: {}, imposible: falta };
-    // por cada recurso que falta: prueba cubrirlo solo con un tipo de edificio y elige el que,
-    // contando todo (edificios + meta), termina antes
+    // por cada recurso que falta: va eligiendo de a un edificio, el que más tope da por el tiempo que agrega
+    // (así puede mezclar tipos: p. ej. Academies baratas primero y Observatories después, en vez de un solo tipo cada vez más caro)
+    var itemsDe = function (l) { return l.map(function (x) { return { p: x.p, cap: x.cap }; }); };
     for (var ir = 0; ir < recursos.length; ir++) {
-      var r = recursos[ir], mejor = null;
-      for (var ic = 0; ic < cand.length; ic++) (function (c) {
-        if (!(c.dmax[r] > 1e-6)) return;
-        var lista = [], acum = 0, yaHay = pasos.filter(function (x) { return x.name === c.name; }).length, extraC = Object.assign({}, extra);
-        for (var n = 0; acum < falta[r] - 1e-6 && n < 40; n++) {
-          var p = game.bld.getPrices(c.name, yaHay + n);
-          if (!p.every(function (x) { var rr = R(x.name); return !rr.maxValue || x.val <= rr.maxValue + (extraC[x.name] || 0); })) return; // no cabe
-          lista.push({ type: "buildings", name: c.name, p: p, cap: c.dmax, motivo: "almacenamiento" });
-          acum += c.dmax[r];
-          Object.keys(c.dmax).forEach(function (q) { extraC[q] = (extraC[q] || 0) + c.dmax[q]; });
+      var r = recursos[ir], lista = [], acum = 0, extraC = Object.assign({}, extra);
+      var tPrev = pasos.length ? tcomp(simular(M, itemsDe(pasos))) : 0;
+      for (var n = 0; acum < falta[r] - 1e-6 && n < 40; n++) {
+        var mejorC = null;
+        for (var ic = 0; ic < cand.length; ic++) {
+          var c = cand[ic]; if (!(c.dmax[r] > 1e-6)) continue;
+          var ya = pasos.concat(lista).filter(function (x) { return x.name === c.name; }).length;
+          var p = game.bld.getPrices(c.name, ya);
+          if (!p.every(function (x) { var rr = R(x.name); return !rr.maxValue || x.val <= rr.maxValue + (extraC[x.name] || 0); })) continue; // no cabe
+          if (usaEscasos(p) && !usaEscasos(pMeta)) continue; // el titanium queda para las mejoras
+          var paso = { type: "buildings", name: c.name, p: p, cap: c.dmax, motivo: "almacenamiento" };
+          var t = tcomp(simular(M, itemsDe(pasos.concat(lista, [paso]))));
+          // si hoy no se llega nunca (falta algo que las ayudas pueden destrabar), igual se elige: el que más tope da
+          var punt = isFinite(t) ? Math.min(c.dmax[r], falta[r] - acum) / Math.max(1, t - tPrev) : c.dmax[r] * 1e-12;
+          if (!mejorC || punt > mejorC.punt) mejorC = { paso: paso, t: isFinite(t) ? t : tPrev, punt: punt, c: c };
         }
-        if (acum < falta[r] - 1e-6) return;
-        var todos = pasos.concat(lista).map(function (x) { return { p: x.p, cap: x.cap }; }).concat([{ p: pMeta }]);
-        var t = tcomp(simular(M, todos, null, null));
-        if (!mejor || t < mejor.t || (!isFinite(mejor.t) && lista.length < mejor.lista.length)) mejor = { t: t, lista: lista, extraC: extraC };
-      })(cand[ic]), await esperar();
-      if (!mejor) continue;
-      pasos = pasos.concat(mejor.lista); extra = mejor.extraC; falta[r] = 0;
+        await esperar();
+        if (!mejorC) break;
+        lista.push(mejorC.paso); acum += mejorC.c.dmax[r]; tPrev = mejorC.t;
+        Object.keys(mejorC.c.dmax).forEach(function (q) { extraC[q] = (extraC[q] || 0) + mejorC.c.dmax[q]; });
+      }
+      if (acum < falta[r] - 1e-6) continue;
+      pasos = pasos.concat(lista); extra = extraC; falta[r] = 0;
     }
     return { pasos: pasos, extra: extra, imposible: recursos.some(function (r) { return falta[r] > 1e-6; }) ? falta : null };
   }
@@ -833,24 +839,26 @@
     var nec = Object.keys(necesarios); if (!nec.length) return [];
     if (necesarios.furs || necesarios.ivory) nec.push("manpower");
     var elegidos = [], M0 = M;
+    var metaPideEscaso = A.EDIFICIOS_SIN.some(function (r) { return necesarios[r] > 0; }); // la meta misma pide titanium
     var nombres = function () { return elegidos.map(function (e) { return e.name; }); };
     var itemsElegidos = function () { return elegidos.map(function (e) { return { p: e.p, M: e.M }; }); };
     for (var vuelta = 0; vuelta < A.MAX_EDIFICIOS_AYUDA; vuelta++) {
       var cand = [];
       // todo se mide como si ya tuvieras los edificios elegidos antes (así el 2.º Oil Well cuenta sobre el 1.º)
       conVarios(nombres(), function () {
-        var baseRates = prodActual();
+        var baseRates = prodActual(), feliz0 = game.village.happiness;
         game.bld.buildingsData.forEach(function (b) {
-          if (!b.unlocked || consumeSinSostener(b, M0)) return; // p. ej. un Magneto más con el oil bajando
+          if (!b.unlocked || consumeSinSostener(b, M0, true)) return; // p. ej. un Magneto más con el oil bajando (en cualquier modo)
           var p = game.bld.getPrices(b.name, elegidos.filter(function (e) { return e.name === b.name; }).length);
           if (game.resPool.isStorageLimited(p)) return; // no cabe en tu almacenamiento (función del juego)
-          var delta;
-          try { delta = conEdificio(b.name, function () { var o = prodActual(); var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
+          if (!metaPideEscaso && usaEscasos(p)) return; // el titanium queda para las mejoras (p. ej. Calciner), salvo que la meta lo pida
+          var delta, feliz1 = feliz0;
+          try { delta = conEdificio(b.name, function () { var o = prodActual(); feliz1 = game.village.happiness; var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
           // sirve si sube la producción de algo necesario (o lo potencia aunque hoy nadie trabaje en eso)
           var ef = b.effects || {};
           var directo = Object.keys(ef).some(function (k) { return !/Max$/.test(k) && nec.some(function (r) { return k.indexOf(r) === 0 && (ef[k] || 0) > 0; }); });
-          // si lo único que sube es la felicidad (Temple, Amphitheatre…), no cuenta: sube todo un poquito, pero gasta gold, manuscripts…
-          if (!directo && ef.happiness > 0) return;
+          // si lo único que cambia es la felicidad (Temple, Amphitheatre…), no cuenta: sube todo un poquito, pero gasta gold, manuscripts…
+          if (!directo && Math.abs((feliz1 || 0) - (feliz0 || 0)) > 1e-9) return;
           var gana = directo || nec.some(function (r) { return delta[r] > 1e-9; });
           if (gana) cand.push({ name: b.name, p: p, delta: delta });
         });
@@ -915,9 +923,9 @@
 
   // =================== QUE NO SE ACABE NADA ===================
   // ¿el edificio consume algo que no depende de gatitos y ya va bajando (o quedaría bajando)?
-  function consumeSinSostener(b, M) {
-    if (!mantActivo()) return false;
-    var ef = b.effects || {};
+  function consumeSinSostener(b, M, siempre) {
+    if (!siempre && !mantActivo()) return false;
+    var ef = Object.assign({}, b.effects || {}, b.effectsCalculated || {}); // el consumo completo (effects baja a 0 si el edificio está sin insumos)
     return Object.keys(ef).some(function (k) {
       if (!/PerTick(Con)?$/.test(k) || !(ef[k] < 0)) return false;
       var r = k.replace(/PerTick(Con)?$/, ""); if (mejorJob(M, r)) return false;
@@ -1041,13 +1049,25 @@
     delete falta.titanium; // va por comercio
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r), b = M.base[r] || 0, conJ = j ? b + M.m[j][r] * M.N : b, conv = null;
-      if (!j) M.conv.forEach(function (c) { if (c.outs[r] > 0) { conv = c; conJ = b + c.outs[r]; } });
-      porRec.push({ r: r, falta: falta[r], job: j, conv: conv ? etiqueta("buildings", conv.nombre) : null, t: conJ > 0 ? falta[r] / conJ : Infinity, solo: !j && !conv });
+      if (!j) M.conv.forEach(function (c) { if (c.outs[r] > 0) { conv = (conv ? conv + " y " : "") + etiqueta("buildings", c.nombre); conJ += c.outs[r]; } }); // todos los que lo producen (Smelters + Calciners)
+      porRec.push({ r: r, falta: falta[r], job: j, conv: conv, t: conJ > 0 ? falta[r] / conJ : Infinity, solo: !j && !conv });
     });
     porRec.sort(function (a, b) { return b.t - a.t; });
+    // edificios apagados que producen algo que el plan necesita (p. ej. Smelters apagados: no entra iron)
+    var avisos = [];
+    game.bld.buildingsData.forEach(function (b) {
+      if (!b.val || typeof b.on !== "number" || b.on >= b.val) return;
+      var ef = Object.assign({}, b.effects || {}, b.effectsCalculated || {}), da = {};
+      Object.keys(ef).forEach(function (k) {
+        var m = /^(.+?)(PerTickAutoprod|PerTickBase|PerTickProd|PerTick|Ratio)$/.exec(k);
+        if (m && ef[k] > 0 && falta[m[1]] > 0) da[m[1]] = true;
+      });
+      if (Object.keys(da).length) avisos.push("Tienes " + (b.val - b.on) + " " + etiqueta("buildings", b.name) + " apagados, y producen " + Object.keys(da).map(titulo).join(", ") +
+        ", que este plan necesita. Si los enciendes y vuelves a calcular, el plan cambia.");
+    });
     var z = zebras();
     return {
-      type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: tAhoraSinNada,
+      type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: tAhoraSinNada, avisos: avisos,
       porRec: porRec, imposible: alm.imposible, ms: Math.round(performance.now() - t0),
       tratos: tratos.reduce(function (a, s) { return a + s.k; }, 0), faltaTi: faltaTi, zebras: z,
       sinZebras: faltaTi > 0 && !tratos.length
@@ -1162,13 +1182,13 @@
     if (p.type === "trade") return "Comerciar " + p.k + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
     if (p.type === "ship") {
       var rinde = (rec("ship") || { rinde: 1 }).rinde, zb = zebras(p.veces * rinde);
-      return "Fabricar ~" + Math.round(p.veces * rinde) + " barcos <span style='color:#7fd19b'>(ahorra " + textoAhorro(p.ahorro || 0) + ")</span>" +
+      return "Fabricar ~" + Math.round(p.veces * rinde) + " barcos <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro || 0) + ")</span>" +
         (zb ? " <span style='color:#9aa3b2'>→ ~" + num(zb.ti) + " titanium por trato</span>" : "");
     }
     return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
       (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
       (p.motivo === "sostener" ? " <span style='color:#e0b050'>(para no quedarte sin " + titulo(p.recurso) + ")</span>" : "") +
-      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(ahorra " + textoAhorro(p.ahorro) + ")</span>" : "");
+      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + ")</span>" : "");
   }
   function terminarPaso() {
     var p = d.plan.pasos.shift(); if (!p) return;
@@ -1242,6 +1262,7 @@
   // vuelve a simular lo que queda del plan con la producción de ahora (p. ej. tras una compra de oportunidad)
   function reestimar() {
     var P = d.plan; if (!P || !P.pasos.length) return;
+    game.updateCaches(); topes(); // el juego sube los topes recién en su próximo tick: sin esto, tras comprar un edificio de almacenamiento decía "no cabe"
     var items = P.pasos.map(function (p) {
       if (p.type === "trade") return { p: p.p, gana: p.gana };
       return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
@@ -1430,31 +1451,43 @@
     });
     return out;
   }
-  // producción por segundo; lo fabricable suma lo que se podría fabricar con lo que entra de sus insumos (como Kitten Scientists)
-  function tickDe(r, prof) {
-    var t = game.getResourcePerTick(r, true) * tps(), rc = (prof || 0) < 3 ? rec(r) : null;
-    if (rc) {
-      var min = Infinity;
-      Object.keys(rc.porVez).forEach(function (q) { var tq = tickDe(q, (prof || 0) + 1); min = Math.min(min, tq * rc.rinde / rc.porVez[q]); });
-      if (isFinite(min)) t += Math.max(0, min);
-    }
-    return t;
+  // Cuánto vale 1 unidad de un recurso, en segundos de tu producción "a tope" (todos los libres en el mejor oficio
+  // para ese recurso + lo que dan Smelters, Calciners…). Lo fabricado vale lo que valen sus insumos.
+  // (Kitten Scientists usa la producción del momento; si justo está en negativo o en 0, todo parece valer muchísimo.)
+  var capCache = null;
+  function capacidades() {
+    if (capCache && segundos - capCache.seg < 300) return capCache.v;
+    var M = medirSeguro(), v = {};
+    game.resPool.resources.forEach(function (res) {
+      var r = res.name, j = mejorJob(M, r), c = Math.max(0, M.base[r] || 0) + (j ? M.m[j][r] * M.N : 0);
+      M.conv.forEach(function (x) { c += x.outs[r] || 0; });
+      if (c > 1e-9) v[r] = c;
+    });
+    var jh = Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0]; // catpower: lo de los hunters antes de cazar
+    if (jh) v.manpower = Math.max(v.manpower || 0, M.mpCrudo[jh] * M.N);
+    capCache = { seg: segundos, v: v };
+    return v;
   }
-  // ¿conviene el trato? (idea de Kitten Scientists, TradeManager.getProfitability): cada recurso vale
-  // "segundos de producción". Costo: gold + catpower + lo que pide la raza; ganancia: lo que da, solo lo que cabe.
+  function valorSeg(r, caps, prof) {
+    if (caps[r] > 0) return 1 / caps[r];
+    var rc = (prof || 0) < 5 && esFab(r) ? rec(r) : null; if (!rc) return null; // no lo produces: no se puede valorar
+    var s = 0, ok = true;
+    Object.keys(rc.porVez).forEach(function (q) { var vq = valorSeg(q, caps, (prof || 0) + 1); if (vq === null) ok = false; else s += vq * rc.porVez[q] / rc.rinde; });
+    return ok ? s : null;
+  }
+  // ¿conviene el trato? (idea de Kitten Scientists, TradeManager.getProfitability): se compara lo que se paga
+  // (gold + catpower + lo que pide la raza) con lo que se recibe (solo lo que cabe), todo en segundos de producción.
   function rentabilidad(o) {
-    var pagos = { gold: o.gold, manpower: o.catpower }, costo = 0, gana = 0;
+    var caps = capacidades(), pagos = { gold: o.gold, manpower: o.catpower }, costo = 0, gana = 0, nCabe = 0;
     pagos[o.compra] = (pagos[o.compra] || 0) + o.compraVal;
-    for (var r in pagos) { var t = tickDe(r); if (!(t > 0)) return null; costo += pagos[r] / t; } // se paga con algo que no se produce o baja
-    var nCabe = 0;
+    for (var r in pagos) { var vr = valorSeg(r, caps); if (vr === null) return null; costo += pagos[r] * vr; } // se paga con algo que no produces
     Object.keys(o.da).forEach(function (q) {
       var res = R(q), cabe = res.maxValue ? Math.max(0, res.maxValue - res.value) : Infinity, cant = Math.min(o.da[q], cabe);
       if (o.da[q] > 0) nCabe = Math.max(nCabe, cabe / o.da[q]);
-      if (!(cant > 0)) return;
-      var t = tickDe(q);
-      gana += cant / Math.max(t, 0.1); // si no se produce (o baja), se cuenta como si entrara 0,1 por segundo
+      var vq = valorSeg(q, caps); if (!(cant > 0) || vq === null) return;
+      gana += cant * vq;
     });
-    return { ratio: costo > 0 ? gana / costo : 0, nCabe: Math.floor(nCabe) };
+    return { ratio: costo > 0 ? gana / costo : 0, nCabe: Math.floor(nCabe), costo: costo, gana: gana };
   }
   // lo que le falta al plan en curso (en materias primas, sin contar la reserva de insumos)
   function faltaPlanAhora() {
@@ -1734,6 +1767,7 @@
           (x.noCabe ? "no cabe en tu almacenamiento" : x.porSeg > 1e-9 ? "+" + num(x.porSeg) + "/s → " + tiempo(x.t) + " más" : "no se produce") + ")</li>";
       }).join("") + "</ul></div>";
     }
+    (P.avisos || []).forEach(function (a) { h += "<div style='color:#e0b050;margin-bottom:4px'>⚠ " + a + "</div>"; });
     if (P.imposible) h += "<div style='color:#e57373'>No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", ") + ".</div>";
     if (P.sinZebras) h += "<div style='color:#e57373'>Faltan " + num(P.faltaTi) + " de titanium y no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco).</div>";
     if (P.tratos && P.zebras) h += "<div style='color:#9aa3b2;font-size:11.5px'>Zebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos, " + num(P.zebras.porTi) +
@@ -1827,7 +1861,8 @@
     planBarcos: planBarcos, efectoFestival: efectoFestival, festivalQuiere: festivalQuiere, oportunidad: oportunidad, lleno: lleno, infoResumen: infoResumen,
     mantenimiento: mantenimiento, oroATitanio: oroATitanio, asignar: asignar, politica: politica,
     rankingEdificios: rankingEdificios, siguienteEdificio: siguienteEdificio,
-    colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores } };
+    colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores,
+    tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     calcularYMostrar(retomar.meta.type, retomar.meta.name, { auto: !!retomar.meta.auto }).then(function () {
