@@ -57,7 +57,7 @@
     try {
       localStorage.setItem(CLAVE, JSON.stringify({ on: d.on, log: d.log.slice(0, 40), tot: d.tot, totDesde: d.totDesde,
         cola: d.cola, colaActiva: !!d.colaActiva,
-        meta: d.plan ? { type: d.plan.type, name: d.plan.name, auto: !!d.plan.auto, deCola: !!d.plan.deCola, inicio: d.plan.inicio, estimado: d.plan.estimado, pausado: d.plan.pausado, pausaDesde: d.plan.pausaDesde, hechos: (d.plan.hechos || []).slice(-10) } : null,
+        meta: d.plan ? { type: d.plan.type, name: d.plan.name, auto: !!d.plan.auto, deCola: !!d.plan.deCola, metaHecha: !!d.plan.metaHecha, inicio: d.plan.inicio, estimado: d.plan.estimado, pausado: d.plan.pausado, pausaDesde: d.plan.pausaDesde, hechos: (d.plan.hechos || []).slice(-10) } : null,
         ejecutando: d.ejecutando, pausa: d.pausa, modoEdificios: !!d.modoEdificios, historial: d.historial.slice(0, 10), apagados: d.apagadosMano || {} }));
     } catch (e) {}
   }
@@ -874,7 +874,14 @@
     var elegidos = [], M0 = M;
     var metaPideEscaso = A.EDIFICIOS_SIN.some(function (r) { return necesarios[r] > 0; }); // la meta misma pide titanium
     var nombres = function () { return elegidos.map(function (e) { return e.name; }); };
-    var itemsElegidos = function () { return elegidos.map(function (e) { return { p: e.p, M: e.M }; }); };
+    // arma la lista a simular: las ayudas "antes" van primero; las "después" (solo cola), justo tras la meta actual
+    var armar = function (nuevo, despues) {
+      var it = function (e) { return { p: e.p, M: e.M }; };
+      var antes = elegidos.filter(function (e) { return !e.despues; }).map(it), tras = elegidos.filter(function (e) { return e.despues; }).map(it);
+      if (nuevo) (despues ? tras : antes).push(nuevo);
+      var cp = items.map(function (x) { return Object.assign({}, x); });
+      return { lista: antes.concat(cp.slice(0, iMeta + 1)).concat(tras).concat(cp.slice(iMeta + 1)), iM: antes.length + iMeta };
+    };
     for (var vuelta = 0; vuelta < A.MAX_EDIFICIOS_AYUDA; vuelta++) {
       var cand = [];
       // todo se mide como si ya tuvieras los edificios elegidos antes (así el 2.º Oil Well cuenta sobre el 1.º)
@@ -911,21 +918,25 @@
       cand.sort(function (a, b) { return b.puntaje - a.puntaje; });
       cand = cand.slice(0, 12);
       for (var ic = 0; ic < cand.length; ic++) {
-        var c = cand[ic], M2;
-        try { M2 = conVarios(nombres().concat([c.name]), function () { return medir(M0.nFijos); }); } catch (e) { continue; }
-        var lista = itemsElegidos().concat([{ p: c.p, M: M2 }]).concat(items.map(function (x) { return Object.assign({}, x); }));
-        var r = simular(M0, lista);
-        var tr = tcomp(r), ahorro = tBase - tr, paraCola = false;
-        if (colaModo) {
-          var tm = lista[elegidos.length + 1 + iMeta].t; // cuándo termina esta meta con la ayuda
-          if (tm === undefined || tm > tMeta0 * (1 + A.COLA_RETRASO_PCT) + 60) { await esperar(); continue; } // atrasaría esta meta
-          paraCola = true; // el ahorro se mide en la cola entera
+        var c = cand[ic];
+        // con cola: antes de la meta actual (si no la atrasa) o justo después (no la toca: es para las siguientes)
+        var lugares = colaModo ? [false, true] : [false];
+        for (var il = 0; il < lugares.length; il++) {
+          var despues = lugares[il], M2;
+          var conQue = (despues ? nombres() : elegidos.filter(function (e) { return !e.despues; }).map(function (e) { return e.name; })).concat([c.name]);
+          try { M2 = conVarios(conQue, function () { return medir(M0.nFijos); }); } catch (e) { continue; }
+          var a = armar({ p: c.p, M: M2 }, despues), r = simular(M0, a.lista);
+          var tr = tcomp(r), ahorro = tBase - tr;
+          if (colaModo && !despues) {
+            var tm = a.lista[a.iM].t; // cuándo termina esta meta con la ayuda
+            if (tm === undefined || tm > tMeta0 * (1 + A.COLA_RETRASO_PCT) + 60) { await esperar(); continue; } // atrasaría esta meta
+          }
+          if (ahorro > Math.max(60, isFinite(tBase) ? tBase * A.AYUDA_MIN_PCT : 0) && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr, paraCola: colaModo, despues: despues };
+          await esperar();
         }
-        if (ahorro > Math.max(60, isFinite(tBase) ? tBase * A.AYUDA_MIN_PCT : 0) && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr, paraCola: paraCola };
-        await esperar();
       }
       if (!mejor) break;
-      elegidos.push({ type: "buildings", name: mejor.c.name, p: mejor.c.p, M: mejor.M2, motivo: "adelanta la meta", ahorro: mejor.ahorro, paraCola: mejor.paraCola });
+      elegidos.push({ type: "buildings", name: mejor.c.name, p: mejor.c.p, M: mejor.M2, motivo: "adelanta la meta", ahorro: mejor.ahorro, paraCola: mejor.paraCola, despues: mejor.despues });
       tBase = mejor.t;
     }
     return elegidos;
@@ -1105,10 +1116,13 @@
     var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra);
     var ayudas = await planAyudas(M, items, tAhora, sig);
     // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
-    var pasos = alm.pasos.slice(0, nSost).concat(ayudas).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
-    // simulación final con todo
-    var itemsF = items.slice(0, nSost).concat(ayudas.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
-    var fin = (ayudas.length || barcos || nSost) ? simular(M, itemsF) : base;
+    // las ayudas "después" (para las metas siguientes de la cola) van tras la meta: no la atrasan
+    var ayA = ayudas.filter(function (a) { return !a.despues; }), ayD = ayudas.filter(function (a) { return a.despues; });
+    var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
+    // simulación final con todo (hasta la meta: su tiempo es el que se muestra)
+    var itemsF = items.slice(0, nSost).concat(ayA.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
+    var fin = (ayA.length || barcos || nSost) ? simular(M, itemsF) : base;
+    itemsF = itemsF.concat(ayD.map(function (a) { return { p: a.p, M: a.M }; }));
     // tiempos de las metas siguientes, haciendo la cola en orden (desde ahora)
     var tCola = {};
     if (sig.length) {
@@ -1245,9 +1259,8 @@
     if (!d.plan || !d.ejecutando || d.pausa) return;
     var p = d.plan.pasos[0];
     if (!p) {
-      anotar((d.plan.auto ? "Edificios: listo " : "¡Meta cumplida: ") + d.plan.label + (d.plan.auto ? "" : "!"));
-      registrarResultado();
-      if (d.plan.deCola && d.cola.length) { d.cola.shift(); d.colaEst = null; d.colaTotal = null; }
+      if (!d.plan.metaHecha) { anotar((d.plan.auto ? "Edificios: listo " : "¡Meta cumplida: ") + d.plan.label + (d.plan.auto ? "" : "!")); registrarResultado(); }
+      if (d.plan.deCola && d.cola.length && !d.plan.metaHecha) { d.cola.shift(); d.colaEst = null; d.colaTotal = null; }
       if (d.colaActiva && !d.cola.length) { d.colaActiva = false; anotar("Cola terminada"); }
       // sigue con la cola; si no hay, con el edificio que tarde menos
       if (!d.colaActiva && d.on.edificios) { d.modoEdificios = true; ultimaBusqueda = -999; }
@@ -1275,8 +1288,13 @@
     var col = colchones(); // no deja sin insumos a Smelters, Magnetos, etc.
     if (p.p.every(function (x) { return R(x.name).value >= x.val + colPara(col, x, R(x.name).maxValue || Infinity); })) {
       if (comprar(p.type, p.name)) {
-        anotar("Compré " + etiqueta(p.type, p.name) + (p.motivo !== "meta" ? " (" + p.motivo + ")" : ""));
-        terminarPaso(); ultimoReparto = -999; guardar();
+        anotar("Compré " + etiqueta(p.type, p.name) + (p.motivo !== "meta" ? " (" + (p.despues ? "para las metas siguientes" : p.motivo) + ")" : ""));
+        terminarPaso(); ultimoReparto = -999;
+        if (p.motivo === "meta" && d.plan.pasos.length) { // quedan las ayudas para la cola: la meta ya está
+          d.plan.metaHecha = true; anotar("¡Meta cumplida: " + d.plan.label + "! Ahora lo que acelera las siguientes"); registrarResultado();
+          if (d.plan.deCola && d.cola.length) { d.cola.shift(); d.colaEst = null; d.colaTotal = null; } // ya no está pendiente
+        }
+        guardar();
       }
     }
     }
@@ -1294,7 +1312,7 @@
     return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
       (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
       (p.motivo === "sostener" ? " <span style='color:#e0b050'>(para no quedarte sin " + titulo(p.recurso) + ")</span>" : "") +
-      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + (p.paraCola ? " en la cola" : "") + ")</span>" : "");
+      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + (p.paraCola ? " en la cola" : "") + (p.despues ? "; después de la meta, no la atrasa" : "") + ")</span>" : "");
   }
   function terminarPaso() {
     var p = d.plan.pasos.shift(); if (!p) return;
@@ -1396,7 +1414,8 @@
   function reestimar() {
     var P = d.plan; if (!P || !P.pasos.length) return;
     game.updateCaches(); topes(); // el juego sube los topes recién en su próximo tick: sin esto, tras comprar un edificio de almacenamiento decía "no cabe"
-    var items = P.pasos.map(function (p) {
+    var iMeta = -1; P.pasos.forEach(function (p, i) { if (iMeta < 0 && p.motivo === "meta") iMeta = i; });
+    var items = (iMeta >= 0 ? P.pasos.slice(0, iMeta + 1) : P.pasos).map(function (p) { // el tiempo es hasta la meta (las ayudas para la cola van después)
       if (p.type === "trade") return { p: p.p, gana: p.gana };
       return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
     });
@@ -1979,8 +1998,9 @@
     if (!d.cola.length) return "";
     var h = d.cola.map(function (c, i) {
       var e = (d.colaEst || {})[c.type + "|" + c.name + "|" + i];
-      var activo = i === 0 && d.plan && d.plan.deCola && d.ejecutando;
-      var t = i === 0 && d.plan && d.plan.deCola && isFinite(tcomp(d.plan.sim)) ? (d.ejecutando ? restante(d.plan) : tcomp(d.plan.sim)) : e && e.t ? tiempoCola(e) : null;
+      var esPlan = i === 0 && d.plan && d.plan.deCola && !d.plan.metaHecha && d.plan.type === c.type && d.plan.name === c.name;
+      var activo = esPlan && d.ejecutando;
+      var t = esPlan && isFinite(tcomp(d.plan.sim)) ? (d.ejecutando ? restante(d.plan) : tcomp(d.plan.sim)) : e && e.t ? tiempoCola(e) : null;
       var txt = t !== null && isFinite(t) ? (e && e.aprox ? "unas " : "~") + tiempo(Math.max(1, t)) : e && e.tope ? "falta tope" : e && e.nunca ? "nunca a este ritmo" : e ? "se calcula al llegar" : "";
       var tip = t !== null ? "Desde ahora hasta tenerla, haciendo la cola en orden" : e && e.tope ? "No cabe en tu almacenamiento: al llegar a esta meta se agregan los edificios que suben el tope y se calcula el tiempo" : "Se calcula al llegar a esta meta";
       return "<div style='display:flex;gap:6px;align-items:center" + (activo ? ";color:#fff" : "") + "'>" +
@@ -2178,13 +2198,14 @@
     mantenimiento: mantenimiento, oroATitanio: oroATitanio, asignar: asignar, politica: politica,
     rankingEdificios: rankingEdificios, siguienteEdificio: siguienteEdificio,
     colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores,
-    tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora } };
+    tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora,
+    planAyudas: planAyudas, faltante: faltante, prodActual: prodActual, itemsSiguientes: itemsSiguientes, prefabricarCola: prefabricarCola, preciosCola: preciosCola, calcularCola: calcularCola } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     var rm = retomar.meta, calc;
     if (rm.auto) calc = calcularYMostrar(rm.type, rm.name, { auto: true });
     else { // todo va por la cola (un plan de antes, sin cola, pasa a ser su primera meta)
-      if (!d.cola.length || d.cola[0].type !== rm.type || d.cola[0].name !== rm.name) d.cola.unshift({ type: rm.type, name: rm.name, label: etiqueta(rm.type, rm.name) });
+      if (!rm.metaHecha && (!d.cola.length || d.cola[0].type !== rm.type || d.cola[0].name !== rm.name)) d.cola.unshift({ type: rm.type, name: rm.name, label: etiqueta(rm.type, rm.name) });
       d.colaActiva = true; calc = calcularCola();
     }
     calc.then(function () {
