@@ -20,6 +20,7 @@
     ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
     ORO_RENTABLE_PCT: 0.8, // tratos rentables (idea de Kitten Scientists): solo con el gold por encima de este % del tope
     AYUDA_MIN_PCT: 0.03,   // un edificio que ayuda debe ahorrar al menos 1 min y este % del tiempo total
+    CATNIP_MIN_REFINAR: 0.95, // nunca se refina catnip por debajo de este % del tope (ni para pagar tratos)
     FABRICAR_PCT: 0.05,    // beam/slab/plate al llenarse: cada segundo usa este % del material
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
     EDIFICIOS_EXCLUIR: ["unicornPasture"], // la Unicorn Pasture la decide "Invertir unicorns"
@@ -80,6 +81,11 @@
   // fabrica y anota en el resumen cuánto salió de verdad
   function craftear(nombre, veces) {
     if (!(veces >= 1)) return 0;
+    if (nombre === "wood") { // refinar catnip: nunca bajar del 95 % del tope (los gatitos se mueren de hambre; pasó al pagar tratos con wood)
+      var cn = R("catnip"), porVez = (game.workshop.getCraftPrice(game.workshop.getCraft("wood")).filter(function (p) { return p.name === "catnip"; })[0] || { val: 100 }).val;
+      veces = Math.min(veces, Math.floor((cn.value - cn.maxValue * A.CATNIP_MIN_REFINAR) / porVez));
+      if (!(veces >= 1)) return 0;
+    }
     var antes = R(nombre).value;
     if (game.workshop.craft(nombre, veces, true) === false) return 0;
     sumar(nombre, R(nombre).value - antes);
@@ -1617,7 +1623,7 @@
     // slabs (lo que piden las Zebras): solo los de los tratos que se pueden hacer. Salen de la "cuenta aparte" de los
     // miners de mantenimiento (modo edificios) o de lo que sobre; nunca de la reserva de Smelters/Calciner.
     var faltaS = n * z.compraVal - libre(z.compra, resT), rc = rec(z.compra);
-    if (faltaS > 0 && rc) {
+    if (faltaS > 0 && rc && esFab(z.compra)) { // wood no: saldría del catnip
       var resS = Object.assign({}, res), col0 = colchonesBase(), antes = {};
       Object.keys(rc.porVez).forEach(function (q) {
         antes[q] = R(q).value;
