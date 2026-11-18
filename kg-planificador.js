@@ -323,6 +323,9 @@
     var usado = {}; Object.keys(falta).forEach(function (q) { usado[q] = true; });
     Object.keys(falta).forEach(function (r) {
       if (mejorJob(M, r)) return;
+      // si ese recurso ya está lleno (p. ej. iron al tope), producir más no sirve: lo que frena es lo que hace falta
+      // para fabricar con él (coal para el steel), así que no se juntan wood/minerals para los Smelters
+      var tope = R(r) && R(r).maxValue; if (tope > 0 && ((st || {})[r] || 0) >= tope * 0.98) return;
       var c = M.conv.filter(function (x) { return x.outs[r] > 0; })[0]; if (!c) return;
       Object.keys(c.ins).forEach(function (q) {
         var nec = falta[r] * c.ins[q] / c.outs[r], hay = usado[q] ? 0 : ((st || {})[q] || 0);
@@ -1179,7 +1182,7 @@
 
   // ---------- pasos: hechos, actual y su avance ----------
   function textoPaso(p) {
-    if (p.type === "trade") return "Comerciar " + p.k + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
+    if (p.type === "trade") return "Comerciar " + (p.k > 0 ? p.k : (p.kHechos || 0)) + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
     if (p.type === "ship") {
       var rinde = (rec("ship") || { rinde: 1 }).rinde, zb = zebras(p.veces * rinde);
       return "Fabricar ~" + Math.round(p.veces * rinde) + " barcos <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro || 0) + ")</span>" +
@@ -1278,7 +1281,7 @@
     if (n < 1) return;
     var antes = R("titanium").value;
     dip.tradeMultiple(z.race, n);
-    p.k -= n; sumar("tratos", n); sumar("titanium", R("titanium").value - antes);
+    p.k -= n; p.kHechos = (p.kHechos || 0) + n; sumar("tratos", n); sumar("titanium", R("titanium").value - antes);
     anotar("Comercié " + n + " veces con las Zebras: +" + num(R("titanium").value - antes) + " titanium");
     if (p.k <= 0) { terminarPaso(); ultimoReparto = -999; guardar(); }
   }
@@ -1802,7 +1805,7 @@
     if (apag.length) h += "<div style='margin-top:4px;font-size:11.5px'><b>Apagados por ti (no los enciendo):</b> " + apag.map(function (n) { return etiqueta("buildings", n); }).join(", ") + "</div>";
     if (d.on.manuscript && d.culturaEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Culture:</b> " + d.culturaEstado + "</div>";
     if (d.on.lider && d.liderEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Líder:</b> " + d.liderEstado + "</div>";
-    if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → tratos:</b>" + d.oroEstado + "</div>";
+    if (d.on.oroTitanio && d.oroEstado) h += "<div style='margin-top:4px;font-size:11.5px'><b>Gold → tratos:</b> " + d.oroEstado + "</div>";
     h += "<details data-det='datos' style='margin-top:6px'" + (abiertos.datos ? " open" : "") + "><summary><b>Datos</b></summary><div style='font-size:11.5px'>" + infoDatos() + "</div></details>";
     h += "<div style='margin-top:6px'><b>Resumen</b><div style='font-size:11.5px'>" + infoResumen() + "</div></div>";
     h += "<div style='margin-top:6px'><b>Bitácora</b><div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 15).join("<br>") || "—") + "</div></div>";
