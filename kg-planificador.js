@@ -469,7 +469,11 @@
       var j = q === "manpower" ? Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0] : mejorJob(M, q); if (!j) return;
       var r = R(q), neto = (game.getResourcePerTick(q, true) || 0) * tps(), clave = j + "|" + q, ex = d.mantExtra[clave] || 0;
       if (neto < 0 && !(r.maxValue && r.value >= r.maxValue * 0.98)) d.mantExtra[clave] = Math.min(ex + 1, 15);
-      else if (ex > 0 && neto > nec[q] * (q === "manpower" ? 0.1 : 0.25)) d.mantExtra[clave] = ex - 1; // catpower: excedente mínimo
+      else if (q === "manpower") { // catpower: siempre ganando, pero de a poco. Solo saca un hunter si sin él igual sube
+        // (antes lo sacaba con el 10 % de sobra: un hunter rinde más que eso, así que subía y bajaba cada 30 s: −0,47/s)
+        if (ex > 0 && neto - (M.mpCrudo[j] || 0) * A.MANT_MARGEN > 0) d.mantExtra[clave] = ex - 1;
+      }
+      else if (ex > 0 && neto > nec[q] * 0.25) d.mantExtra[clave] = ex - 1;
     });
   }
   // cuánto consumen por segundo los edificios encendidos (Con = conversores; PerTick negativo = Magneto con el oil)
