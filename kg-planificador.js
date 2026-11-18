@@ -189,7 +189,8 @@
   // catnip según estación (sin clima frío/cálido)
   function catnipEstaciones() {
     var cal = game.calendar, s0 = cal.season, w0 = cal.weather, v = [];
-    try { for (var s = 0; s < 4; s++) { cal.season = s; cal.weather = null; v.push(game.calcResourcePerTick("catnip") * tps()); } }
+    // el invierno se mide con clima frío (−15 %): así los farmers alcanzan aunque toque un invierno malo
+    try { for (var s = 0; s < 4; s++) { cal.season = s; cal.weather = s === 3 ? "cold" : null; v.push(game.calcResourcePerTick("catnip") * tps()); } }
     finally { cal.season = s0; cal.weather = w0; }
     return { prom: (v[0] + v[1] + v[2] + v[3]) / 4, invierno: v[3], v: v };
   }
@@ -1346,10 +1347,24 @@
     var consumo = -Math.min(0, game.getEffect(n + "PerTickCon") || 0) * tps() * 2;
     return r.value >= Math.min(r.maxValue * pct, r.maxValue - consumo);
   }
+  // si el catnip se va a acabar en menos de 2 min, avisa y (con un plan en marcha) reparte ya: medirSeguro suma farmers
+  var avisoCatnip = -999;
+  function vigilarCatnip() {
+    var c = R("catnip"), net = (game.getResourcePerTick("catnip", true) || 0) * tps();
+    d.catnipAlerta = null;
+    if (!(net < 0) || c.value / -net > 120) return;
+    d.catnipAlerta = "El catnip se acaba en ~" + tiempo(c.value / -net) + (d.plan && d.ejecutando ? ": sumando farmers" : ": pon más farmers");
+    if (d.plan && d.ejecutando && segundos - ultimoReparto > 10) ultimoReparto = -999;
+    if (segundos - avisoCatnip >= 60) {
+      avisoCatnip = segundos;
+      anotar("⚠ El catnip se acaba en ~" + tiempo(c.value / -net) + " (" + num(net) + "/s)" + (d.plan && d.ejecutando ? ": sumo farmers" : ": pon más farmers o los gatitos se mueren de hambre"));
+    }
+  }
   function automaticos() {
     var res = reservas(), necesitaCaza = !!(res.furs || res.ivory || res.parchment || res.manuscript || res.compedium);
     var resF = Object.assign({}, res); resF.furs = (res.furs || 0) + A.RESERVA_FURS; // furs: siempre deja una reserva
     vigilarApagados();
+    vigilarCatnip();
     if (d.on.cielo && game.calendar.observeBtn) { var b = document.querySelector("#observeButton input"); if (b) b.click(); else game.calendar.observeHandler(); sumar("cielo", 1); }
     if (d.on.refinar && lleno("catnip", 0.99)) fabricar("wood", 5); // refina de a 5: el catnip queda cerca del 99 % (en invierno aguanta con lo guardado)
     var fest = d.on.festival ? festivalQuiere(res) : null;
@@ -1384,6 +1399,7 @@
       // oil lleno → kerosene: lo que sale de los Oil Wells no se pierde (7500 oil c/u; solo mientras siga sobre el 98 %)
       [["wood", "beam", 0.98], ["minerals", "slab", 0.98], ["iron", "plate", 0.995], ["oil", "kerosene", 0.98]].forEach(function (x) {
         if (!lleno(x[0], x[2])) return;
+        if ((game.getResourcePerTick(x[0], true) || 0) < 0) return; // si va bajando no se pierde nada (p. ej. oil con Magnetos)
         var rc = rec(x[1]), porVez = rc && rc.porVez[x[0]]; if (!porVez) return;
         fabricar(x[1], Math.max(1, Math.floor(R(x[0]).value * A.FABRICAR_PCT / porVez)), res);
       });
@@ -1677,6 +1693,7 @@
       var soloFe = pr.every(function (x) { return x.name === "faith" || libre(x.name, res) >= x.val; });
       if (feP <= f.maxValue && soloFe) return; // espera a juntar la fe
     }
+    if ((res || {}).faith > 0) return; // Praise gasta toda la faith: no si el plan la necesita
     game.religion.praise(); sumar("praise", 1); anotar("Fe: Praise the sun (" + num(f.value) + ")");
   }
 
@@ -1885,6 +1902,7 @@
     h += '<div style="display:flex;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:240px">' + opcionesMeta() + "</select>" +
       '<button data-a="calc" style="' + est + ';background:#2a4a6b" title="Calcula el plan para esta meta">Calcular</button>' +
       '<button data-a="colaAgregar" style="' + est + '" title="Agrega esta meta a la cola (varias compras, una tras otra)">+ Cola</button></div>';
+    if (d.catnipAlerta) h += "<div style='color:#e57373;font-weight:bold;margin-top:4px'>⚠ " + d.catnipAlerta + "</div>";
     h += htmlCola();
     h += '<div id="kgP_plan">' + vista + "</div>";
     // estado de los automáticos: una línea cada uno (el detalle, al pasar el mouse)
