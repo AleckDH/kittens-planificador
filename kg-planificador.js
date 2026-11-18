@@ -43,7 +43,7 @@
     try { var g = JSON.parse(localStorage.getItem(CLAVE) || "{}"); d.on = g.on; d.log = g.log; d.tot = g.tot; d.totDesde = g.totDesde; d.modoEdificios = g.modoEdificios; d.historial = g.historial; d.apagadosMano = g.apagados || {}; d.cola = g.cola || []; d.colaActiva = !!g.colaActiva; if (g.meta && g.ejecutando) retomar = g; } catch (e) {}
   }
   d.on = Object.assign({ cielo: true, refinar: true, cazar: true, manuscript: true, steel: true, bsp: true, fe: true, unicornios: true,
-    festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true, lider: true, mantenerSiempre: false }, d.on || {}); // las opciones nuevas vienen encendidas
+    festival: true, oportunidad: true, escasos: true, oroTitanio: true, edificios: true, lider: true, mantenerSiempre: false, polucion: true }, d.on || {}); // las opciones nuevas vienen encendidas
   d.log = d.log || [];
   d.cola = d.cola || [];        // cola: varias metas, una tras otra [{type, name, label}]
   d.historial = d.historial || []; // metas cumplidas: tiempo estimado y real
@@ -1876,7 +1876,8 @@
     ["lider", "Ascender al líder", "Sube de rango al líder cuando hay gold libre (25 × rango siguiente) y le alcanza la experiencia."],
     ["escasos", "Mantener (modo edificios)", "En el modo edificios deja gatitos para que Smelters, Calciners, Mints, Magnetos… nunca se queden sin insumos, guarda " + Math.round(A.COLCHON_SEG / 60) + " min de consumo y agrega Oil Wells si baja el oil."],
     ["mantenerSiempre", "Mantener también con tus metas", "Lo mismo que \"Mantener\", pero también mientras trabaja en tus metas y en la cola: ningún edificio se queda parado. La meta tarda algo más. Necesita \"Mantener\" encendido. Se aplica al calcular (vuelve a calcular después de cambiarlo)."],
-    ["edificios", "Modo edificios al terminar", "Al terminar la meta (o la cola), sigue comprando el edificio que tarde menos. No compra los que piden titanium."]];
+    ["edificios", "Modo edificios al terminar", "Al terminar la meta (o la cola), sigue comprando el edificio que tarde menos. No compra los que piden titanium."],
+    ["polucion", "Detalle de pollution", "Al pasar el mouse sobre la pollution (arriba del juego): cuánta produce y limpia cada edificio, el nivel y sus efectos, y cuánto falta para el nivel siguiente o para llegar a cero. Basado en Kittens Pollution Tooltip de xpg (MIT). Apagarlo se nota al recargar la página."]];
   function nombresConv(M) { return M.conv.map(function (c) { return etiqueta("buildings", c.nombre); }).join(", ") || "los conversores"; }
   function textoMant(mt) { return Object.keys(mt).map(function (j) { return mt[j] + " " + (JT[j] || j); }).join(" y "); }
   var vista = "";
@@ -2169,6 +2170,82 @@
     } catch (er) { console.error(er); anotar("Error: " + er.message); pintar(); }
   });
 
+  // =================== DETALLE DE POLLUTION ===================
+  // Basado en "Kittens Pollution Tooltip" 1.1.1 de xpg (https://xpg.jp/kittensgame/). Cambia el tooltip del
+  // ícono de pollution por uno con el detalle por edificio. Esta parte se distribuye bajo su licencia:
+  //   MIT License — Copyright (c) 2026 xpg
+  //   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  //   documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+  //   the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+  //   to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+  //   The above copyright notice and this permission notice shall be included in all copies or substantial portions
+  //   of the Software.
+  //   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+  //   THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  //   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+  //   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  //   DEALINGS IN THE SOFTWARE.
+  var POL_EFECTOS = ["cathPollutionPerTickProd", "cathPollutionPerTickCon"];
+  function edificiosPolucion(efecto) { // edificios (y sus etapas) que producen o limpian pollution
+    var out = [];
+    [game.bld.meta, game.space.meta, game.time.meta].forEach(function (grupos) {
+      (grupos || []).forEach(function (g) {
+        (g.meta || []).forEach(function (b) {
+          if (b.stages) b.stages.forEach(function (st, k) { if (st.effects && efecto in st.effects) out.push({ data: st, b: b, etapa: k }); });
+          else if (b.effects && efecto in b.effects) out.push({ data: b, b: b, etapa: -1 });
+        });
+      });
+    });
+    return out;
+  }
+  function textoPolucion() {
+    var bld = game.bld, pol = bld.cathPollution, porTick = bld.cathPollutionPerTick, tpsJ = game.ticksPerSecond;
+    var v = function (x, signo) { return game.getDisplayValueExt(x, !!signo); };
+    var fila = function (nombre, txt) { return "<br>" + nombre + ":&nbsp;<div style='float:right;'>" + txt + "</div>"; };
+    var filaE = function (nombre, x, limpia) { return "<br>|-> <span class='energy" + (limpia ? "Production" : "Consumption") + "'>" + nombre + ":&nbsp;<span style='float:right;'>" + v(x) + "</span></span>"; };
+    var porEdificio = function (efecto) {
+      return edificiosPolucion(efecto).map(function (x) {
+        if (x.etapa !== -1 && x.etapa !== x.b.stage) return "";
+        var n = (x.b.on || 0) * x.data.effects[efecto];
+        return n ? fila(x.data.label || x.b.label || x.b.name, v(n, true)) : "";
+      }).join("");
+    };
+    var h = "Pollution por tick: " + (porTick ? "<span class='energy" + (porTick < 0 ? "Production" : "Consumption") + "'>" : "") + v(porTick, true) + (porTick ? "</span>" : "");
+    if (pol > 0) {
+      var nivel = bld.getPollutionLevel(), ef = bld.pollutionEffects;
+      h += "<br>Nivel: " + nivel + "<br>|-> Menos producción de catnip: " + v(ef.catnipPollutionRatio * 100) + " %";
+      if (nivel >= 1) h += "<br>|-> Menos felicidad: " + v(ef.pollutionHappines);
+      if (nivel >= 2) h += "<br>|-> Los gatitos llegan " + v(ef.pollutionArrivalSlowdown) + " veces más lento";
+      if (nivel >= 4) h += "<br>|-> Menos efecto de Solar Revolution (wood, catnip): " + v(ef.solarRevolutionPollution * 100) + " %";
+      var base = bld.getPollutionLevelBase();
+      if (porTick < 0) {
+        var baja = -porTick * tpsJ;
+        if (nivel > 0) h += "<br>Al nivel anterior: " + game.toDisplaySeconds(((pol - Math.pow(10, nivel - 1) * base) / baja).toFixed());
+        h += "<br>A cero: " + game.toDisplaySeconds((pol / baja).toFixed());
+      } else if (porTick > 0) h += "<br>Al nivel siguiente: " + game.toDisplaySeconds(((Math.pow(10, nivel) * base - pol) / (porTick * tpsJ)).toFixed());
+    }
+    h += "<br>---------- Producen" + porEdificio("cathPollutionPerTickProd");
+    var limpia = bld.getCleanEnergy(), sucia = bld.getPollutingEnergy();
+    var ratio = 1 - (limpia + sucia !== 0 ? limpia / ((limpia + sucia) * 2) : 0);
+    h += fila("Por la energía", "×" + v(ratio * 100) + " %") + filaE("Energía limpia", limpia, true) + filaE("Energía que contamina", sucia, false);
+    var r = 1 + game.getEffect("cathPollutionRatio");
+    if (r > 1) h += fila("Castigo", v((r - 1) * 100, true) + " %");
+    else if (r < 1) h += fila("Reducción", "×" + v(r * 100) + " %");
+    h += "<br>---------- Limpian" + porEdificio("cathPollutionPerTickCon");
+    if (pol > 0) h += fila("Plantas", v(-pol * bld.pollutionEffects.pollutionDissipationRatio, true));
+    return h;
+  }
+  // se revisa cada 10 s: el ícono aparece recién con la pollution, y el juego puede volver a dibujarlo
+  function adjuntarPolucion() {
+    if (!d.on.polucion || typeof UIUtils === "undefined" || !UIUtils.attachTooltip) return;
+    var nodo = document.querySelector(".toolbarIcon.pollutionIcon");
+    if (!nodo || nodo.dataset.kgPlanPol === "1" || nodo.dataset.kptTooltipAttached === "1") return; // ya está (o tienes el script original)
+    var nuevo = nodo.cloneNode(true); // clonar descarta el tooltip viejo del juego
+    nodo.parentNode.replaceChild(nuevo, nodo);
+    nuevo.dataset.kgPlanPol = "1";
+    UIUtils.attachTooltip(game, nuevo, 0, 100, function () { try { return textoPolucion(); } catch (e) { return "Pollution: no pude armar el detalle (" + e.message + ")"; } });
+  }
+
   // =================== BUCLE ===================
   var timer = setInterval(function () {
     segundos++;
@@ -2187,6 +2264,7 @@
       siguienteEdificio().catch(function (e) { console.error(e); anotar("Edificios: error " + e.message); });
     }
     if (segundos % 10 === 0) guardar();
+    if (segundos % 10 === 1) try { adjuntarPolucion(); } catch (e) { console.error("[Planificador pollution]", e); }
     if (segundos % 2 === 0) {
       if (document.activeElement && document.activeElement.id === "kgP_meta") return;
       vista = pintarPlan(); pintar();
