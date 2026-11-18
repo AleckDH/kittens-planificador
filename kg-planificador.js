@@ -23,6 +23,10 @@
     AYUDA_MIN_PCT: 0.03,   // un edificio que ayuda debe ahorrar al menos 1 min y este % del tiempo total
     CATNIP_MIN_REFINAR: 0.95, // nunca se refina catnip por debajo de este % del tope (ni para pagar tratos)
     FABRICAR_PCT: 0.05,    // beam/slab/plate al llenarse: cada segundo usa este % del material
+    ANTES_TOPE_SEG: 10,    // los que se transforman (wood, minerals, iron, coal, oil) se fabrican antes: si en este tiempo llegarían al tope
+    COLA_RETRASO_PCT: 0.05, // una ayuda para las metas siguientes de la cola no puede atrasar la meta actual más que esto
+    PREFAB_PCT: 0.9,       // cola: con el insumo sobre este % del tope, fabrica lo que piden las metas siguientes…
+    PREFAB_DEJAR_PCT: 0.75, // …sin bajarlo de este % (no le quita nada a la meta actual)
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
     EDIFICIOS_EXCLUIR: ["unicornPasture"], // la Unicorn Pasture la decide "Invertir unicorns"
     EDIFICIOS_SIN: ["titanium"] // el modo edificios no compra edificios que piden esto (directo o fabricado: alloy…); queda para las mejoras
@@ -544,12 +548,8 @@
     ultimoReparto = -999;
     if (!d.plan) { ultimaBusqueda = -999; return; }
     if (d.plan.auto) { d.plan = null; ultimaBusqueda = -999; return; } // modo edificios: vuelve a elegir con lo que hay encendido
-    var P = d.plan, seguir = d.ejecutando, guardado = {};
-    ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (P[k] !== undefined) guardado[k] = P[k]; });
-    calcularYMostrar(P.type, P.name, {}).then(function () {
-      if (d.plan) { Object.assign(d.plan, guardado); marcarSim(d.plan); d.ejecutando = seguir; guardar(); }
-      vista = pintarPlan(); pintar();
-    }).catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
+    recalcular().then(function () { guardar(); vista = pintarPlan(); pintar(); })
+      .catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
   }
   function encenderConsumidores() {
     game.bld.buildingsData.forEach(function (b) {
@@ -859,7 +859,14 @@
   }
 
   // edificios que adelantan la meta (contando lo que cuestan)
-  async function planAyudas(M, items, tBase) {
+  // Con más metas en la cola (sig): elige lo que termina la cola entera antes, pero sin atrasar esta meta
+  // más de COLA_RETRASO_PCT (p. ej. Smelters para el iron que pide la última, si no frenan a la primera).
+  async function planAyudas(M, items, tBase, sig) {
+    var colaModo = false, tMeta0 = tBase, iMeta = items.length - 1;
+    if (sig && sig.length) {
+      var rq0 = simular(M, items.concat(sig).map(function (x) { return Object.assign({}, x); }));
+      if (isFinite(rq0.t)) { colaModo = true; items = items.concat(sig); tBase = rq0.t; }
+    }
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var necesarios = faltante(stock, items.map(function (i) { return i.p; }));
     var nec = Object.keys(necesarios); if (!nec.length) return [];
@@ -906,13 +913,19 @@
       for (var ic = 0; ic < cand.length; ic++) {
         var c = cand[ic], M2;
         try { M2 = conVarios(nombres().concat([c.name]), function () { return medir(M0.nFijos); }); } catch (e) { continue; }
-        var r = simular(M0, itemsElegidos().concat([{ p: c.p, M: M2 }]).concat(items));
-        var tr = tcomp(r), ahorro = tBase - tr;
-        if (ahorro > Math.max(60, isFinite(tBase) ? tBase * A.AYUDA_MIN_PCT : 0) && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr };
+        var lista = itemsElegidos().concat([{ p: c.p, M: M2 }]).concat(items.map(function (x) { return Object.assign({}, x); }));
+        var r = simular(M0, lista);
+        var tr = tcomp(r), ahorro = tBase - tr, paraCola = false;
+        if (colaModo) {
+          var tm = lista[elegidos.length + 1 + iMeta].t; // cuándo termina esta meta con la ayuda
+          if (tm === undefined || tm > tMeta0 * (1 + A.COLA_RETRASO_PCT) + 60) { await esperar(); continue; } // atrasaría esta meta
+          paraCola = true; // el ahorro se mide en la cola entera
+        }
+        if (ahorro > Math.max(60, isFinite(tBase) ? tBase * A.AYUDA_MIN_PCT : 0) && (!mejor || ahorro > mejor.ahorro)) mejor = { c: c, M2: M2, ahorro: ahorro, t: tr, paraCola: paraCola };
         await esperar();
       }
       if (!mejor) break;
-      elegidos.push({ type: "buildings", name: mejor.c.name, p: mejor.c.p, M: mejor.M2, motivo: "adelanta la meta", ahorro: mejor.ahorro });
+      elegidos.push({ type: "buildings", name: mejor.c.name, p: mejor.c.p, M: mejor.M2, motivo: "adelanta la meta", ahorro: mejor.ahorro, paraCola: mejor.paraCola });
       tBase = mejor.t;
     }
     return elegidos;
@@ -1044,9 +1057,27 @@
   function mantActivo() { return !!d.on.escasos && (!!d.on.mantenerSiempre || esAuto()); }
   async function calcularPlan(type, name, opts) {
     enCalculo = !!(opts && opts.auto);
-    try { var P = await calcularPlan0(type, name); P.auto = enCalculo; return P; } finally { enCalculo = null; }
+    try { var P = await calcularPlan0(type, name, (opts && opts.siguientes) || []); P.auto = enCalculo; return P; } finally { enCalculo = null; }
   }
-  async function calcularPlan0(type, name) {
+  // Las metas que siguen en la cola, para simularlas después de la primera: cada una con sus tratos por titanium.
+  // Se corta en la primera que no cabe en el tope (esa se calcula al llegar, con sus edificios de almacenamiento).
+  function itemsSiguientes(siguientes, previos, extraCap) {
+    var out = [], stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
+    var acum = previos.slice(), tiAntes = faltante(stock, acum).titanium || 0;
+    for (var i = 0; i < siguientes.length; i++) {
+      var s = siguientes[i], tf = topeFaltante(s.p);
+      if (Object.keys(tf).some(function (r) { return tf[r] > ((extraCap || {})[r] || 0) + 1e-6; })) break;
+      acum.push(s.p);
+      var tiAhora = faltante(stock, acum).titanium || 0, tiEsta = tiAhora - tiAntes; tiAntes = tiAhora;
+      if (tiEsta > 0) {
+        var tr = pasosComercio(tiEsta); if (!tr.length) break; // sin Zebras no se llega: se calcula al llegar
+        tr.forEach(function (x) { out.push({ p: x.p, gana: x.gana }); });
+      }
+      out.push({ p: s.p, meta: s.i });
+    }
+    return out;
+  }
+  async function calcularPlan0(type, name, siguientes) {
     RECETAS = {};
     var t0 = performance.now(), espera0 = 0;
     var M = medirSeguro();
@@ -1070,12 +1101,22 @@
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
         .concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
     }
-    var ayudas = await planAyudas(M, items, tAhora);
+    // el resto de la cola: las ayudas se eligen para terminar la cola entera antes, sin atrasar esta meta
+    var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra);
+    var ayudas = await planAyudas(M, items, tAhora, sig);
     // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
     var pasos = alm.pasos.slice(0, nSost).concat(ayudas).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]);
     // simulación final con todo
     var itemsF = items.slice(0, nSost).concat(ayudas.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
     var fin = (ayudas.length || barcos || nSost) ? simular(M, itemsF) : base;
+    // tiempos de las metas siguientes, haciendo la cola en orden (desde ahora)
+    var tCola = {};
+    if (sig.length) {
+      var itemsQ = itemsF.map(function (x) { return Object.assign({}, x); }).concat(sig.map(function (x) { return Object.assign({}, x); }));
+      var rq = simular(M, itemsQ);
+      itemsQ.forEach(function (x) { if (x.meta !== undefined && x.t !== undefined) tCola[x.meta] = Math.max(1, x.t); });
+      if (!isFinite(rq.t) && isFinite(rq.tEst)) { var ultQ = sig[sig.length - 1]; if (tCola[ultQ.meta] === undefined) tCola[ultQ.meta] = { est: rq.tEst }; }
+    }
     // tiempos por recurso (con todos los libres en su mejor oficio)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var falta = faltante(stock, pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; })), porRec = [];
@@ -1103,12 +1144,12 @@
       type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: tAhoraSinNada, avisos: avisos,
       porRec: porRec, imposible: alm.imposible, ms: Math.round(performance.now() - t0),
       tratos: tratos.reduce(function (a, s) { return a + s.k; }, 0), faltaTi: faltaTi, zebras: z,
-      sinZebras: faltaTi > 0 && !tratos.length
+      sinZebras: faltaTi > 0 && !tratos.length, tCola: tCola, nSig: sig.filter(function (x) { return x.meta !== undefined; }).length
     };
   }
 
   // =================== EJECUCIÓN ===================
-  function reservas() { // lo que el plan necesita (y los insumos de los edificios que consumen): nadie más debe gastarlo
+  function reservas(sinCola) { // lo que el plan necesita (y los insumos de los edificios que consumen): nadie más debe gastarlo
     var o = colchones();
     if (!d.plan || !d.ejecutando) return o;
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = 0; });
@@ -1116,7 +1157,36 @@
     d.plan.pasos.forEach(function (p) { reales(p).forEach(function (x) { o[x.name] = (o[x.name] || 0) + x.val; }); });
     var bruto = faltante(stock, d.plan.pasos.map(reales));
     Object.keys(bruto).forEach(function (r) { o[r] = Math.max(o[r] || 0, bruto[r]); });
+    // lo ya fabricado para las metas siguientes de la cola (plates, steel…) tampoco se gasta en otra cosa
+    var fc = sinCola ? {} : fabricadosCola();
+    Object.keys(fc).forEach(function (r) { o[r] = (o[r] || 0) + Math.min(fc[r], Math.max(0, R(r).value - (o[r] || 0))); });
     return o;
+  }
+  // lo fabricado (no materias primas) que piden las metas siguientes de la cola
+  function fabricadosCola() {
+    var o = {}; if (!d.plan || !d.plan.deCola || d.cola.length < 2) return o;
+    preciosCola(1).forEach(function (p) { p.forEach(function (x) { if (esFab(x.name)) o[x.name] = (o[x.name] || 0) + x.val; }); });
+    return o;
+  }
+  // Cola: mientras se trabaja en la meta actual, fabrica lo que piden las siguientes con lo que está por llenarse
+  // (iron casi lleno → plates para la última), sin bajar el insumo de PREFAB_DEJAR_PCT ni tocar lo que reserva la meta actual.
+  function prefabricarCola(res) {
+    var fc = fabricadosCola(), hecho = [], resMeta = reservas(true);
+    Object.keys(fc).forEach(function (n) {
+      var falta = fc[n] - Math.max(0, R(n).value - (resMeta[n] || 0)); // lo que ya hay, después de lo que pide la meta actual
+      if (falta <= 0) return;
+      var c = game.workshop.getCraft(n); if (!c || !c.unlocked) return;
+      var resP = Object.assign({}, res), sirve = true;
+      game.workshop.getCraftPrice(c).forEach(function (x) {
+        var r = R(x.name); if (esFab(x.name)) return; // lo fabricado se usa si sobra (respetando la reserva)
+        if (!(r.maxValue > 0) || r.value < r.maxValue * A.PREFAB_PCT) { sirve = false; return; } // solo con lo que se va a desbordar
+        resP[x.name] = Math.max(resP[x.name] || 0, r.maxValue * A.PREFAB_DEJAR_PCT);
+      });
+      if (!sirve) return;
+      var rinde = (rec(n) || { rinde: 1 }).rinde || 1, antes = R(n).value;
+      if (fabricar(n, Math.ceil(falta / rinde), resP)) hecho.push(num(R(n).value - antes) + " " + titulo(n));
+    });
+    if (hecho.length) anotar("Cola: fabriqué " + hecho.join(", ") + " para las metas siguientes");
   }
   function libre(n, res) { return R(n).value - ((res || {})[n] || 0); }
   function fabricar(nombre, max, res) {
@@ -1224,7 +1294,7 @@
     return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
       (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
       (p.motivo === "sostener" ? " <span style='color:#e0b050'>(para no quedarte sin " + titulo(p.recurso) + ")</span>" : "") +
-      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + ")</span>" : "");
+      (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + (p.paraCola ? " en la cola" : "") + ")</span>" : "");
   }
   function terminarPaso() {
     var p = d.plan.pasos.shift(); if (!p) return;
@@ -1401,14 +1471,18 @@
     if (d.on.oportunidad && segundos % 10 === 0) oportunidad(res);
     if (d.on.escasos && segundos % 10 === 3) encenderConsumidores();
     if (d.on.steel && segundos % A.STEEL_CADA_SEG === 0) fabricar("steel", Infinity, res);
+    if (d.plan && d.plan.deCola && d.ejecutando && !d.pausa && segundos % 5 === 2) prefabricarCola(res);
     if (d.on.bsp) {
-      // al llenarse, cada segundo fabrica con el 5 % del material (antes 1 por segundo: se perdía lo que desbordaba)
-      // oil lleno → kerosene: lo que sale de los Oil Wells no se pierde (7500 oil c/u; solo mientras siga sobre el 98 %)
-      [["wood", "beam", 0.98], ["minerals", "slab", 0.98], ["iron", "plate", 0.995], ["oil", "kerosene", 0.98]].forEach(function (x) {
-        if (!lleno(x[0], x[2])) return;
-        if ((game.getResourcePerTick(x[0], true) || 0) < 0) return; // si va bajando no se pierde nada (p. ej. oil con Magnetos)
+      // Lo que se transforma no debe llegar al tope: si en ANTES_TOPE_SEG se llenaría, fabrica ya con el 5 % del material
+      // (o con lo que entra en ese tiempo, si es más). Así nunca se desborda ni los Smelters trabajan para nada con el iron lleno.
+      // coal → steel (con iron); iron → plate; oil → kerosene (7500 oil c/u)
+      [["coal", "steel"], ["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", "kerosene"]].forEach(function (x) {
+        var r = R(x[0]), sube = (game.getResourcePerTick(x[0], true) || 0) * tps();
+        if (!(r.maxValue > 0) || sube <= 0) return; // si va bajando no se pierde nada (p. ej. oil con Magnetos)
+        if (r.value + sube * A.ANTES_TOPE_SEG < r.maxValue && !lleno(x[0], 0.98)) return;
         var rc = rec(x[1]), porVez = rc && rc.porVez[x[0]]; if (!porVez) return;
-        fabricar(x[1], Math.max(1, Math.floor(R(x[0]).value * A.FABRICAR_PCT / porVez)), res);
+        var usar = Math.max(r.value * A.FABRICAR_PCT, sube * A.ANTES_TOPE_SEG);
+        fabricar(x[1], Math.max(1, Math.floor(usar / porVez)), res);
       });
     }
     if (d.on.fe) fe(res);
@@ -1774,7 +1848,7 @@
     ["cazar", "Cazar", "Caza cuando el catpower se llena o el plan necesita furs/ivory. Deja " + A.RESERVA_CAZA + " de catpower."],
     ["manuscript", "Culture", "Con la culture al " + Math.round(A.CULTURA_PCT * 100) + " %: primero embassies (la más barata, mientras quepa en el tope); después manuscripts, solo si los furs no bajaron en los últimos 5 min."],
     ["steel", "Steel", "Cada " + A.STEEL_CADA_SEG + " s fabrica steel con el coal y el iron que el plan no necesita."],
-    ["bsp", "Beam/slab/plate/kerosene", "Con wood, minerals, iron u oil llenos, cada segundo fabrica beam, slab, plate o kerosene con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (el oil, de a 1 kerosene = 7500), para que no se pierda lo que se produce."],
+    ["bsp", "No llegar al tope", "Coal, wood, minerals, iron y oil nunca llegan al tope: si en " + A.ANTES_TOPE_SEG + " s se llenarían, fabrica steel, beam, slab, plate o kerosene con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (o lo que entra en ese tiempo, si es más). Así no se pierde lo que se produce ni los Smelters trabajan para nada. Nunca toca lo que reserva el plan."],
     ["fe", "Fe", "Compra la mejora de religión más barata que alcance; si no conviene esperar, Praise the sun."],
     ["unicornios", "Unicorns", "Compra lo que se paga antes: Unicorn Pasture o mejoras del Ziggurat (sacrificando solo lo necesario)."],
     ["festival", "Festivales", "Desde Drama, si un festival sube la producción al menos 5 %."],
@@ -1844,14 +1918,15 @@
     var P = d.plan, rk = (d.rankingEdificios || []).map(function (x) { return x.label + " " + tiempo(x.t); }).join("\n");
     if (!P) {
       if (d.colaActiva && d.cola.length) return "<div style='color:#7fd19b;margin-top:6px'>Cola: preparando " + d.cola[0].label + "…</div>";
-      if (d.modoEdificios && d.on.edificios) return "<div style='color:#7fd19b;margin-top:6px;cursor:help' title=\"" + attr(rk ? "Últimos candidatos:\n" + rk : "") + "\">Modo edificios: buscando el que tarde menos…</div>";
-      return "<div style='color:#9aa3b2;margin-top:6px'>Elige una meta y presiona <b>Calcular</b>, o agrégala a la <b>cola</b>.</div>" +
+      if (d.cola.length) return "<div style='color:#9aa3b2;margin-top:6px'>Presiona <b>Recalcular</b> para ver el plan, o <b>Empezar</b>.</div>";
+      if (d.modoEdificios && d.on.edificios) return "<div style='color:#7fd19b;margin-top:6px;cursor:help' title=\"" + attr(rk ? "Últimos candidatos:\n" + rk : "") + "\">Modo edificios: buscando el que tarde menos… <button data-a='detener' style='" + est + ";background:#6b2f2f'>Detener</button></div>";
+      return "<div style='color:#9aa3b2;margin-top:6px'>Elige una meta y presiona <b>Agregar</b>: se suma a la cola y se calcula el plan.</div>" +
         "<div style='margin-top:4px'><button data-a='edificios' style='" + est + "' title='Sin meta: compra uno tras otro el edificio que tarde menos (sin los que piden titanium).'>Solo comprar edificios</button></div>";
     }
     var sinAy = Math.abs(tcomp(P.sim) - P.sinAyuda) > 1 ? "Sin los edificios sugeridos: " + (isFinite(P.sinAyuda) ? (P.sinAyuda > A.HORAS_MAX * 3600 ? "unas " : "") + tiempo(P.sinAyuda) : "nunca a ese ritmo") : "";
     var h = "";
     if (P.auto) h += "<div style='color:#7fd19b;font-size:11.5px;cursor:help' title=\"" + attr(rk ? "Candidatos:\n" + rk : "") + "\">Modo edificios: el que tarda menos</div>";
-    if (P.deCola) h += "<div style='color:#7fd19b;font-size:11.5px'>De la cola (1 de " + d.cola.length + ")</div>";
+    if (P.deCola && d.cola.length > 1) h += "<div style='color:#9aa3b2;font-size:11.5px'>Meta 1 de " + d.cola.length + " de la cola" + (P.nSig ? " (el plan mira también las " + P.nSig + " siguientes)" : "") + "</div>";
     h += "<div style='margin:6px 0 2px;font-size:13.5px" + (sinAy ? ";cursor:help" : "") + "' title=\"" + attr(sinAy) + "\"><b>" + P.label + "</b> — <b style='color:#7fd19b' title='" + (d.ejecutando ? "Baja cada 2 s; se vuelve a calcular cada 5 min y tras cada compra" : "") + "'>" + textoRestante(P) + "</b>" + textoCorregido(P.sim) + "</div>";
     if (mantActivo2(P)) h += "<div style='color:#9aa3b2;font-size:11.5px'>Manteniendo andando: " + nombresConv(P.M) + "</div>";
     // avisos importantes: siempre a la vista
@@ -1875,31 +1950,49 @@
     if (P.tratos && P.zebras) por += "<div style='color:#9aa3b2;font-size:11.5px'>Zebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos → ~" + num(P.zebras.ti) + " por trato.</div>";
     por += "<div style='color:#9aa3b2;font-size:11.5px'>Caza: " + Math.round(P.M.caza.furs) + " furs y " + Math.round(P.M.caza.ivory) + " ivory por caza. Catnip: " + num(P.M.cat.prom) + "/s de promedio, " + num(P.M.cat.invierno) + "/s en invierno. Calculado en " + P.ms + " ms.</div>";
     h += det("porque", "Qué te frena", por, false);
-    if (!d.ejecutando) h += "<div style='margin-top:6px'><button data-a='si' style='" + est + ";background:#2f6b45' title='Empieza a ejecutar este plan: reparte gatitos, fabrica y compra solo.'>Sí, hazlo</button></div>";
-    else h += "<div style='margin-top:6px'><button data-a='pausa' style='" + est + "'>" + (d.pausa ? "Reanudar" : "Pausar") + "</button> <button data-a='cancelar' style='" + est + ";background:#6b2f2f' title='Cancela el plan (y detiene la cola, sin borrarla).'>Cancelar plan</button>" +
-      " <span style='color:#7fd19b'>" + (d.pausa ? "en pausa" : "ejecutando…") + "</span></div>";
+    // los botones del plan de la cola están en la cola; el modo edificios tiene los suyos
+    if (P.auto) h += "<div style='margin-top:6px'>" + botonesMarcha() + "</div>";
     return h;
   }
   function mantActivo2(P) { return !!d.on.escasos && (!!P.auto || !!d.on.mantenerSiempre); }
+  // Empezar / Pausar / Detener / Recalcular: los mismos para la cola y para el modo edificios
+  function botonesMarcha() {
+    var corre = d.ejecutando || d.colaActiva;
+    return "<span style='display:inline-flex;gap:6px;flex-wrap:wrap'>" +
+      (corre ? "<button data-a='pausa' style='" + est + "'>" + (d.pausa ? "Reanudar" : "Pausar") + "</button>" +
+          "<button data-a='detener' style='" + est + ";background:#6b2f2f' title='Para ya. La cola queda guardada.'>Detener</button>"
+        : (d.cola.length ? "<button data-a='empezar' style='" + est + ";background:#2f6b45' title='Hace las metas de la cola una tras otra, sin preguntar.'>Empezar</button>" : "")) +
+      "<button data-a='recalcular' style='" + est + ";background:#2a4a6b' title='Vuelve a calcular con lo que tienes ahora: el mejor plan para toda la cola y sus tiempos. Si está en marcha, sigue.'>Recalcular</button></span>";
+  }
+  function estadoMarcha() {
+    if (d.ejecutando && d.pausa) return "<span style='color:#e0b050'>⏸ en pausa</span>";
+    if (d.ejecutando || d.colaActiva) return "<span style='color:#7fd19b'>▶ en marcha</span>";
+    return "<span style='color:#9aa3b2'>■ detenida</span>";
+  }
+  // tiempo de una meta de la cola: lo estimado al calcular menos lo que pasó desde entonces
+  function tiempoCola(e) {
+    if (!e || !isFinite(e.t)) return e;
+    var pasado = d.ejecutando && !d.pausa && d.colaEstDesde ? (Date.now() - d.colaEstDesde) / 1000 : 0;
+    return Math.max(1, e.t - pasado);
+  }
   function htmlCola() {
     if (!d.cola.length) return "";
     var h = d.cola.map(function (c, i) {
       var e = (d.colaEst || {})[c.type + "|" + c.name + "|" + i];
       var activo = i === 0 && d.plan && d.plan.deCola && d.ejecutando;
+      var t = i === 0 && d.plan && d.plan.deCola && isFinite(tcomp(d.plan.sim)) ? (d.ejecutando ? restante(d.plan) : tcomp(d.plan.sim)) : e && e.t ? tiempoCola(e) : null;
+      var txt = t !== null && isFinite(t) ? (e && e.aprox ? "unas " : "~") + tiempo(Math.max(1, t)) : e && e.tope ? "falta tope" : e && e.nunca ? "nunca a este ritmo" : e ? "se calcula al llegar" : "";
+      var tip = t !== null ? "Desde ahora hasta tenerla, haciendo la cola en orden" : e && e.tope ? "No cabe en tu almacenamiento: al llegar a esta meta se agregan los edificios que suben el tope y se calcula el tiempo" : "Se calcula al llegar a esta meta";
       return "<div style='display:flex;gap:6px;align-items:center" + (activo ? ";color:#fff" : "") + "'>" +
         "<span style='flex:1'>" + (activo ? "▶ " : "<span style='color:#9aa3b2'>" + (i + 1) + ".</span> ") + c.label +
-        (e ? " <span style='color:#9aa3b2;font-size:11.5px;cursor:help' title='" + (e.t ? "Tiempo desde ahora hasta tenerla, haciendo la cola en orden" : e.tope ? "No cabe en tu almacenamiento: al llegar a esta meta se agregan los edificios que suben el tope y se calcula el tiempo" : "Se calcula al llegar a esta meta") + "'>" +
-          (e.t ? "~" + tiempo(e.t) : e.tope ? "falta tope" : "se calcula al llegar") + "</span>" : "") + "</span>" +
+        (txt ? " <span style='color:#9aa3b2;font-size:11.5px;cursor:help' title='" + tip + "'>" + txt + "</span>" : "") + "</span>" +
         (i > 0 ? "<button data-a='colaSubir' data-i='" + i + "' style='" + est + ";padding:0 5px' title='Subir'>↑</button>" : "") +
         "<button data-a='colaQuitar' data-i='" + i + "' style='" + est + ";padding:0 5px' title='Quitar de la cola'>✕</button></div>";
     }).join("");
-    h += "<div style='margin-top:4px;display:flex;gap:6px;flex-wrap:wrap'>" +
-      "<button data-a='colaCalc' style='" + est + "' title='Calcula el plan de la primera y cuánto falta para cada una, haciéndolas en orden.'>Calcular cola</button>" +
-      (d.colaActiva ? "<button data-a='colaParar' style='" + est + ";background:#6b2f2f' title='Termina la meta actual y no sigue con la siguiente.'>Detener cola</button>"
-        : "<button data-a='colaEmpezar' style='" + est + ";background:#2f6b45' title='Hace las metas una tras otra, sin preguntar.'>Empezar cola</button>") +
+    h += "<div style='margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>" + botonesMarcha() +
       "<button data-a='colaVaciar' style='" + est + "'>Vaciar</button></div>";
-    if (d.colaTotal && d.colaTotal.t) h += "<div style='color:#9aa3b2;font-size:11.5px;margin-top:2px'>" + (d.colaTotal.completa ? "Toda la cola: ~" : "Hasta donde se puede calcular: ~") + tiempo(d.colaTotal.t) + " (aproximado: cada meta se recalcula al llegar)</div>";
-    return det("cola", "Cola (" + d.cola.length + ")" + (d.colaActiva ? " <span style='color:#7fd19b;font-weight:normal'>· en marcha</span>" : ""), h, true);
+    if (d.colaTotal && d.colaTotal.t && d.cola.length > 1) h += "<div style='color:#9aa3b2;font-size:11.5px;margin-top:2px'>" + (d.colaTotal.completa ? "Toda la cola: ~" : "Hasta donde se puede calcular: ~") + tiempo(tiempoCola(d.colaTotal)) + " (cada meta se vuelve a calcular al llegar)</div>";
+    return det("cola", "Cola (" + d.cola.length + ") " + "<span style='font-weight:normal'>· " + estadoMarcha() + "</span>", h, true);
   }
   function linea(nombre, txt, tip) {
     return "<div style='font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help' title=\"" + attr(tip || sinHtml(txt)) + "\"><b>" + nombre + ":</b> " + txt + "</div>";
@@ -1907,8 +2000,7 @@
   function pintar() {
     var h = '<div style="display:flex;align-items:center;gap:8px"><b style="flex:1;font-size:14px">Planificador</b><button data-a="x" style="' + est + '" title="Cerrar el panel (los automáticos se detienen)">✕</button></div>';
     h += '<div style="display:flex;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:240px">' + opcionesMeta() + "</select>" +
-      '<button data-a="calc" style="' + est + ';background:#2a4a6b" title="Calcula el plan para esta meta">Calcular</button>' +
-      '<button data-a="colaAgregar" style="' + est + '" title="Agrega esta meta a la cola (varias compras, una tras otra)">+ Cola</button></div>';
+      '<button data-a="colaAgregar" style="' + est + ';background:#2a4a6b" title="Agrega esta meta al final de la cola y calcula el mejor plan para toda la cola">Agregar</button></div>';
     if (d.catnipAlerta) h += "<div style='color:#e57373;font-weight:bold;margin-top:4px'>⚠ " + d.catnipAlerta + "</div>";
     h += htmlCola();
     h += '<div id="kgP_plan">' + vista + "</div>";
@@ -1936,7 +2028,7 @@
   caja.addEventListener("toggle", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-det"); if (k) abiertos[k] = e.target.open; }, true);
   async function calcularYMostrar(type, name, opts) {
     calculando = true; vista = pintarPlan(); pintar();
-    try { d.plan = await calcularPlan(type, name, opts); anotar("Plan calculado para " + d.plan.label); }
+    try { d.plan = await calcularPlan(type, name, opts); d.plan.calculadoEn = Date.now(); anotar("Plan calculado para " + d.plan.label); }
     finally { calculando = false; }
   }
 
@@ -1957,35 +2049,70 @@
       return game.bld.getPrices(c.name, k + (desde > 0 && d.cola[0].type === "buildings" && d.cola[0].name === c.name ? 1 : 0));
     });
   }
-  // plan de la primera + cuánto falta para cada una haciéndolas en orden (las siguientes, sin ayudas: se recalculan al llegar)
+  // Todo es la cola: el plan es siempre el de su primera meta, calculado mirando las siguientes
+  // (las ayudas buscan terminar la cola entera antes sin atrasar la primera). Conserva el cronómetro si la meta es la misma.
   async function calcularCola() {
     d.cola = d.cola.filter(function (c) { return !yaHecha(c); });
-    if (!d.cola.length) return;
-    var c0 = d.cola[0];
-    await calcularYMostrar(c0.type, c0.name);
+    if (!d.cola.length) { if (d.plan && d.plan.deCola) { d.plan = null; d.ejecutando = false; } d.colaActiva = false; d.colaEst = null; d.colaTotal = null; return; }
+    var c0 = d.cola[0], P0 = d.plan, guardado = {};
+    var misma = P0 && P0.deCola && P0.type === c0.type && P0.name === c0.name;
+    if (misma) ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (P0[k] !== undefined) guardado[k] = P0[k]; });
+    var precs = preciosCola(0);
+    var sig = precs.slice(1).map(function (p, j) { return { p: p, i: j + 1 }; });
+    await calcularYMostrar(c0.type, c0.name, { siguientes: sig });
     if (!d.plan) return;
     d.plan.deCola = true;
-    var items = d.plan.pasos.map(function (p) { return { p: p.p, cap: p.cap, gana: p.gana, M: p.M }; }), metas = [items.length - 1];
-    preciosCola(1).forEach(function (pr) { items.push({ p: pr }); metas.push(items.length - 1); });
-    var r = simular(d.plan.M, items);
-    d.colaEst = {}; var ultimo = 0, cortada = false;
+    if (misma) { Object.assign(d.plan, guardado); marcarSim(d.plan); }
+    var key = function (c, i) { return c.type + "|" + c.name + "|" + i; };
+    var t0 = tcomp(d.plan.sim), ultimo = isFinite(t0) ? t0 : 0, completa = isFinite(d.plan.sim.t);
+    d.colaEst = {}; d.colaEstDesde = Date.now();
+    d.colaEst[key(c0, 0)] = isFinite(t0) ? { t: Math.max(1, t0), aprox: !isFinite(d.plan.sim.t) } : { nunca: true };
     d.cola.forEach(function (c, i) {
-      var it = items[metas[i]], tope = i > 0 && topeFaltante(it.p) && Object.keys(topeFaltante(it.p)).length > 0;
-      if (it.t !== undefined && !cortada) { ultimo = Math.max(1, it.t); d.colaEst[c.type + "|" + c.name + "|" + i] = { t: ultimo }; }
-      else { cortada = true; d.colaEst[c.type + "|" + c.name + "|" + i] = { tope: tope }; }
+      if (i === 0) return;
+      var x = (d.plan.tCola || {})[i];
+      if (typeof x === "number") { d.colaEst[key(c, i)] = { t: x }; ultimo = x; }
+      else if (x && isFinite(x.est)) { d.colaEst[key(c, i)] = { t: x.est, aprox: true }; ultimo = x.est; completa = false; }
+      else { completa = false; d.colaEst[key(c, i)] = { tope: Object.keys(topeFaltante(precs[i])).length > 0 }; }
     });
-    d.colaTotal = { t: ultimo, completa: !cortada };
+    d.colaTotal = { t: ultimo, completa: completa };
+  }
+  // Recalcular: el mejor plan para la cola con lo que hay ahora; si estaba en marcha, sigue
+  async function recalcular() {
+    if (d.plan && d.plan.auto) { d.plan = null; d.ejecutando = false; ultimaBusqueda = -999; anotar("Modo edificios: vuelvo a elegir"); return; }
+    var seguir = d.ejecutando;
+    await calcularCola();
+    if (!d.plan) return;
+    if (seguir) { d.ejecutando = true; if (!d.plan.inicio) empezarCronometro(); ultimoReparto = -999; }
+  }
+  async function empezar() {
+    if (!d.cola.length) return;
+    if (d.plan && d.plan.auto) { d.plan = null; d.ejecutando = false; }
+    d.modoEdificios = false; d.colaActiva = true; d.pausa = false;
+    var c0 = d.cola[0];
+    // con un plan viejo (más de 1 min), lo vuelve a calcular: lo que hay cambió
+    if (!(d.plan && d.plan.deCola && d.plan.type === c0.type && d.plan.name === c0.name && Date.now() - (d.plan.calculadoEn || 0) < 60000)) await calcularCola();
+    if (!d.plan || !d.colaActiva) return;
+    d.ejecutando = true; ultimoReparto = -999; if (!d.plan.inicio) empezarCronometro();
+    anotar("Cola en marcha: " + d.cola.map(function (c) { return c.label; }).join(" → "));
+  }
+  function detener() {
+    var habia = d.ejecutando || d.colaActiva || d.modoEdificios;
+    d.ejecutando = false; d.colaActiva = false; d.pausa = false; d.modoEdificios = false;
+    if (d.plan && d.plan.auto) d.plan = null;
+    if (d.plan) d.plan.inicio = null; // al volver a empezar, el cronómetro arranca de cero
+    if (habia) anotar("Detenido" + (d.cola.length ? " (la cola queda guardada)" : ""));
   }
   var colaIniciando = false;
+  // al cumplir una meta de la cola, sigue con la siguiente
   async function siguienteDeCola() {
     if (colaIniciando) return; colaIniciando = true;
     try {
       while (d.cola.length && yaHecha(d.cola[0])) { anotar("Cola: " + d.cola[0].label + " ya estaba hecha"); d.cola.shift(); }
       if (!d.cola.length) { d.colaActiva = false; anotar("Cola terminada"); return; }
       var c0 = d.cola[0];
-      if (!(d.plan && d.plan.type === c0.type && d.plan.name === c0.name)) await calcularCola();
+      if (!(d.plan && d.plan.deCola && d.plan.type === c0.type && d.plan.name === c0.name)) await calcularCola();
       if (!d.plan || !d.colaActiva) return;
-      d.plan.deCola = true; d.ejecutando = true; d.pausa = false; ultimoReparto = -999; empezarCronometro();
+      d.plan.deCola = true; d.ejecutando = true; d.pausa = false; ultimoReparto = -999; if (!d.plan.inicio) empezarCronometro();
       anotar("Cola: voy por " + d.plan.label + " (" + tiempoPlan(d.plan.sim) + ")" + (d.cola[1] ? "; después " + d.cola[1].label : ""));
       guardar();
     } finally { colaIniciando = false; }
@@ -1996,40 +2123,27 @@
     var i = +(e.target.getAttribute("data-i") || 0);
     try {
       if (a === "x") { clearInterval(timer); caja.remove(); return; }
+      var cambioCola = false;
       if (a === "colaAgregar") {
         var v2 = document.getElementById("kgP_meta").value.split("|"), lab = etiqueta(v2[0], v2[1]);
         if (v2[0] !== "buildings" && d.cola.some(function (c) { return c.type === v2[0] && c.name === v2[1]; })) anotar(lab + " ya está en la cola");
-        else { d.cola.push({ type: v2[0], name: v2[1], label: lab }); d.colaEst = null; d.colaTotal = null; anotar("Cola: agregué " + lab); }
+        else {
+          d.cola.push({ type: v2[0], name: v2[1], label: lab }); anotar("Cola: agregué " + lab); cambioCola = true;
+          if ((d.plan && d.plan.auto) || (!d.plan && d.modoEdificios)) { // el modo edificios en marcha le cede el paso a la cola
+            var corria = d.ejecutando || d.modoEdificios; if (d.plan) d.plan = null; d.ejecutando = false; d.modoEdificios = false;
+            if (corria) { await empezar(); cambioCola = false; }
+          }
+        }
       }
-      if (a === "colaQuitar") {
-        if (i === 0 && d.plan && d.plan.deCola) { d.ejecutando = false; d.plan = null; } // quitar la que se está haciendo la cancela
-        d.cola.splice(i, 1); d.colaEst = null; d.colaTotal = null;
-        if (!d.cola.length) d.colaActiva = false;
-      }
-      if (a === "colaSubir" && i > 0) {
-        if (i === 1 && d.plan && d.plan.deCola) { d.ejecutando = false; d.plan = null; } // cambia la primera: se recalcula
-        var x = d.cola.splice(i, 1)[0]; d.cola.splice(i - 1, 0, x); d.colaEst = null; d.colaTotal = null;
-      }
-      if (a === "colaVaciar") { if (d.plan && d.plan.deCola) { d.ejecutando = false; d.plan = null; } d.cola = []; d.colaActiva = false; d.colaEst = null; d.colaTotal = null; }
-      if (a === "colaCalc") {
-        if (d.ejecutando && !(d.plan && d.plan.deCola)) { anotar("Primero cancela el plan actual."); }
-        else if (d.ejecutando) anotar("La cola ya está en marcha: las siguientes se calculan al llegar.");
-        else await calcularCola();
-      }
-      if (a === "colaEmpezar") {
-        if (d.ejecutando && !(d.plan && d.plan.deCola)) anotar("Primero cancela el plan actual.");
-        else { d.colaActiva = true; d.modoEdificios = false; anotar("Cola en marcha: " + d.cola.map(function (c) { return c.label; }).join(" → ")); await siguienteDeCola(); }
-      }
-      if (a === "colaParar") { d.colaActiva = false; anotar("Cola detenida: termino la meta actual y paro"); }
-      if (a === "calc") {
-        if (d.ejecutando) { anotar("Primero cancela el plan actual."); pintar(); return; }
-        var v = document.getElementById("kgP_meta").value.split("|");
-        await calcularYMostrar(v[0], v[1]);
-      }
-      if (a === "si" && d.plan) { d.ejecutando = true; d.pausa = false; ultimoReparto = -999; empezarCronometro(); anotar("Ejecutando el plan: " + d.plan.label); }
-      if (a === "pausa") { d.pausa = !d.pausa; cronometroPausa(); anotar(d.pausa ? "Plan en pausa" : "Plan reanudado"); }
+      if (a === "colaQuitar") { d.cola.splice(i, 1); cambioCola = true; }
+      if (a === "colaSubir" && i > 0) { var x = d.cola.splice(i, 1)[0]; d.cola.splice(i - 1, 0, x); cambioCola = true; }
+      if (a === "colaVaciar") { if (d.plan && d.plan.deCola) d.plan = null; detener(); d.cola = []; d.colaEst = null; d.colaTotal = null; }
+      if (cambioCola) await recalcular(); // cualquier cambio en la cola cambia el mejor plan
+      if (a === "recalcular") await recalcular();
+      if (a === "empezar") await empezar();
+      if (a === "detener") detener();
+      if (a === "pausa") { d.pausa = !d.pausa; cronometroPausa(); anotar(d.pausa ? "En pausa" : "Reanudado"); }
       if (a === "resumen0") { d.tot = {}; d.totDesde = Date.now(); }
-      if (a === "cancelar") { d.ejecutando = false; d.plan = null; d.modoEdificios = false; d.colaActiva = false; anotar("Plan cancelado" + (d.cola.length ? " (la cola queda guardada, detenida)" : "")); }
       if (a === "edificios") { d.modoEdificios = true; ultimaBusqueda = -999; anotar("Modo edificios: compra el edificio que tarde menos"); }
       guardar(); vista = pintarPlan(); pintar();
     } catch (er) { console.error(er); anotar("Error: " + er.message); pintar(); }
@@ -2067,9 +2181,15 @@
     tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
-    calcularYMostrar(retomar.meta.type, retomar.meta.name, { auto: !!retomar.meta.auto }).then(function () {
+    var rm = retomar.meta, calc;
+    if (rm.auto) calc = calcularYMostrar(rm.type, rm.name, { auto: true });
+    else { // todo va por la cola (un plan de antes, sin cola, pasa a ser su primera meta)
+      if (!d.cola.length || d.cola[0].type !== rm.type || d.cola[0].name !== rm.name) d.cola.unshift({ type: rm.type, name: rm.name, label: etiqueta(rm.type, rm.name) });
+      d.colaActiva = true; calc = calcularCola();
+    }
+    calc.then(function () {
       if (d.plan) {
-        d.ejecutando = true; d.pausa = !!retomar.pausa; d.plan.deCola = !!retomar.meta.deCola;
+        d.ejecutando = true; d.pausa = !!retomar.pausa; d.plan.deCola = !rm.auto;
         ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (retomar.meta[k] !== undefined) d.plan[k] = retomar.meta[k]; }); // sigue el mismo cronómetro
         if (!d.plan.inicio) empezarCronometro();
         anotar("Retomé el plan: " + d.plan.label); guardar();
