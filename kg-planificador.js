@@ -15,6 +15,7 @@
     ESCASOS_MAX_PCT: 0.7,  // modo edificios: como mucho este % de los libres mantiene los que consumen y los tratos gold → titanium
     COLCHON_SEG: 120,      // insumos que se guardan para los edificios que consumen: este tiempo de consumo
     MANT_MARGEN: 1.15,     // margen al calcular los gatitos de mantenimiento (los que quedan rinden menos que el promedio)
+    MANT_MARGEN_CAT: 1.05, // margen para los hunters de las Mints: excedente mínimo (si igual baja, ajustarMantenimiento suma uno)
     SOSTENER_MAX: 10,      // como mucho tantos edificios por recurso para que no se acabe (p. ej. Oil Wells)
     ORO_TRATOS_PCT: 0.95,  // con el gold a este % del tope, el sobrante se cambia por lo que falte (o titanium)
     ORO_DEJAR_PCT: 0.8,    // …y se deja este % del tope de gold guardado
@@ -427,7 +428,7 @@
             j = Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0]; por = j ? M.mpCrudo[j] : 0;
           } else { j = mejorJob(M, q); por = j ? M.m[j][q] : 0; }
           if (!j || !(por > 0)) return; // oil, gold…: no dependen de gatitos (para eso está la reserva y "sostener")
-          var k = Math.ceil(Math.max(0, nec[q] * A.MANT_MARGEN - (conExtra ? (M.base[q] || 0) : 0)) / por) + (conExtra ? ((d.mantExtra || {})[j + "|" + q] || 0) : 0);
+          var k = Math.ceil(Math.max(0, nec[q] * (q === "manpower" ? A.MANT_MARGEN_CAT : A.MANT_MARGEN) -(conExtra ? (M.base[q] || 0) : 0)) / por) + (conExtra ? ((d.mantExtra || {})[j + "|" + q] || 0) : 0);
           if (k > 0) out.push({ j: j, k: k });
         });
         return out;
@@ -468,7 +469,7 @@
       var j = q === "manpower" ? Object.keys(M.mpCrudo || {}).sort(function (a, b) { return M.mpCrudo[b] - M.mpCrudo[a]; })[0] : mejorJob(M, q); if (!j) return;
       var r = R(q), neto = (game.getResourcePerTick(q, true) || 0) * tps(), clave = j + "|" + q, ex = d.mantExtra[clave] || 0;
       if (neto < 0 && !(r.maxValue && r.value >= r.maxValue * 0.98)) d.mantExtra[clave] = Math.min(ex + 1, 15);
-      else if (ex > 0 && neto > nec[q] * 0.25) d.mantExtra[clave] = ex - 1;
+      else if (ex > 0 && neto > nec[q] * (q === "manpower" ? 0.1 : 0.25)) d.mantExtra[clave] = ex - 1; // catpower: excedente mínimo
     });
   }
   // cuánto consumen por segundo los edificios encendidos (Con = conversores; PerTick negativo = Magneto con el oil)
@@ -480,7 +481,9 @@
     game.bld.buildingsData.forEach(function (b) {
       var v = (b.effects || {})[r + "PerTick"]; if (v < 0 && b.on) c += -v * b.on;
       var base = (CONSUMO_BASE[b.name] || {})[r];
-      if (base && b.on) extra += Math.max(0, base * b.on + Math.min(0, (b.effects || {})[r + "PerTickCon"] || 0)); // lo que le falta para el consumo completo
+      // lo que le falta para el consumo completo; b.effects es por edificio (el juego lo multiplica por b.on):
+      // antes se restaba una sola vez y con 5 Mints contaba 6,75 de catpower por tick en vez de 3,75 (casi el doble de hunters)
+      if (base && b.on) extra += Math.max(0, (base + Math.min(0, (b.effects || {})[r + "PerTickCon"] || 0)) * b.on);
     });
     return (c + extra) * tps();
   }
