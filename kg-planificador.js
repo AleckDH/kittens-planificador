@@ -68,6 +68,11 @@
     if (s < 3600) return Math.round(s / 60) + " min";
     return Math.floor(s / 3600) + " h " + Math.round((s % 3600) / 60) + " min";
   }
+  function tiempoSeg(s) { // para la cuenta regresiva: con segundos bajo la hora, así se ve que baja
+    if (s >= 3600 || !isFinite(s)) return tiempo(s);
+    var m = Math.floor(s / 60), ss = Math.floor(s % 60);
+    return m ? m + " min " + ("0" + ss).slice(-2) + " s" : ss + " s";
+  }
   function textoLimite() { return A.HORAS_MAX >= 48 ? Math.round(A.HORAS_MAX / 24) + " días" : A.HORAS_MAX + " h"; }
   function hora(ts) { var t = ts ? new Date(ts) : new Date(); return ("0" + t.getHours()).slice(-2) + ":" + ("0" + t.getMinutes()).slice(-2); }
   function anotar(txt) { d.log.unshift(hora() + " " + txt); d.log.length = Math.min(d.log.length, 40); }
@@ -528,7 +533,7 @@
     var P = d.plan, seguir = d.ejecutando, guardado = {};
     ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (P[k] !== undefined) guardado[k] = P[k]; });
     calcularYMostrar(P.type, P.name, {}).then(function () {
-      if (d.plan) { Object.assign(d.plan, guardado); d.ejecutando = seguir; guardar(); }
+      if (d.plan) { Object.assign(d.plan, guardado); marcarSim(d.plan); d.ejecutando = seguir; guardar(); }
       vista = pintarPlan(); pintar();
     }).catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
   }
@@ -578,7 +583,7 @@
     Object.keys(est.ritmo || {}).forEach(function (q) { est.cuenta[q] = Math.min(est.ritmo[q] * 3600, (est.cuenta[q] || 0) + est.ritmo[q] * dt); });
     var libreS = function (r) { return (st[r] || 0) - (resRaw[r] || 0) - (col[r] || 0); };
     // beam/slab/plate con lo que se desborda (el automático usa hasta el 5 % del material por segundo)
-    if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"]].forEach(function (x) {
+    if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", "kerosene"]].forEach(function (x) {
       var r = x[0], prod = x[1], rc = rec(prod); if (!(sobra[r] > 0) || !rc) return;
       var porVez = rc.porVez[r] || 0; if (!porVez) return;
       var usa = Math.min(sobra[r], (st[r] || 0) * A.FABRICAR_PCT) * dt;
@@ -1268,7 +1273,21 @@
   // ---------- estimado vs real ----------
   function empezarCronometro() {
     if (!d.plan) return;
-    d.plan.inicio = Date.now(); d.plan.estimado = tcomp(d.plan.sim); d.plan.pausado = 0; d.plan.pausaDesde = null;
+    d.plan.inicio = Date.now(); d.plan.estimado = tcomp(d.plan.sim); d.plan.pausado = 0; d.plan.pausaDesde = null; marcarSim(d.plan);
+  }
+  // cuenta regresiva: lo que estimó la última simulación menos lo que pasó desde entonces (sin contar pausas)
+  function marcarSim(P) { P.simDesde = Date.now(); P.simPausado = P.pausado || 0; }
+  function restante(P) {
+    var t = tcomp(P.sim); if (!isFinite(t)) return t;
+    if (!P.simDesde) marcarSim(P);
+    var ahora = d.pausa && P.pausaDesde ? P.pausaDesde : Date.now();
+    return t - (ahora - P.simDesde - ((P.pausado || 0) - (P.simPausado || 0))) / 1000;
+  }
+  function textoRestante(P) {
+    if (!d.ejecutando || !isFinite(tcomp(P.sim))) return tiempoPlan(P.sim);
+    var r = restante(P);
+    if (r <= 0) { if (Date.now() - (P.reestimadoEn || 0) > 30000) d.reestimar = true; return "ya casi (recalculando)"; }
+    return "quedan " + (isFinite(P.sim.t) ? "" : "unas ") + tiempoSeg(r);
   }
   function cronometroPausa() {
     var P = d.plan; if (!P || !P.inicio) return;
@@ -1298,7 +1317,7 @@
       return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
     });
     P.sim = simular(medirSeguro(), items);
-    P.reestimadoEn = Date.now();
+    P.reestimadoEn = Date.now(); marcarSim(P);
   }
 
   function comerciar(p) {
@@ -1356,7 +1375,8 @@
     if (d.on.steel && segundos % A.STEEL_CADA_SEG === 0) fabricar("steel", Infinity, res);
     if (d.on.bsp) {
       // al llenarse, cada segundo fabrica con el 5 % del material (antes 1 por segundo: se perdía lo que desbordaba)
-      [["wood", "beam", 0.98], ["minerals", "slab", 0.98], ["iron", "plate", 0.995]].forEach(function (x) {
+      // oil lleno → kerosene: lo que sale de los Oil Wells no se pierde (7500 oil c/u; solo mientras siga sobre el 98 %)
+      [["wood", "beam", 0.98], ["minerals", "slab", 0.98], ["iron", "plate", 0.995], ["oil", "kerosene", 0.98]].forEach(function (x) {
         if (!lleno(x[0], x[2])) return;
         var rc = rec(x[1]), porVez = rc && rc.porVez[x[0]]; if (!porVez) return;
         fabricar(x[1], Math.max(1, Math.floor(R(x[0]).value * A.FABRICAR_PCT / porVez)), res);
@@ -1724,7 +1744,7 @@
     ["cazar", "Cazar", "Caza cuando el catpower se llena o el plan necesita furs/ivory. Deja " + A.RESERVA_CAZA + " de catpower."],
     ["manuscript", "Culture", "Con la culture al " + Math.round(A.CULTURA_PCT * 100) + " %: primero embassies (la más barata, mientras quepa en el tope); después manuscripts, solo si los furs no bajaron en los últimos 5 min."],
     ["steel", "Steel", "Cada " + A.STEEL_CADA_SEG + " s fabrica steel con el coal y el iron que el plan no necesita."],
-    ["bsp", "Beam/slab/plate", "Con wood, minerals o iron llenos, cada segundo fabrica con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material."],
+    ["bsp", "Beam/slab/plate/kerosene", "Con wood, minerals, iron u oil llenos, cada segundo fabrica beam, slab, plate o kerosene con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (el oil, de a 1 kerosene = 7500), para que no se pierda lo que se produce."],
     ["fe", "Fe", "Compra la mejora de religión más barata que alcance; si no conviene esperar, Praise the sun."],
     ["unicornios", "Unicorns", "Compra lo que se paga antes: Unicorn Pasture o mejoras del Ziggurat (sacrificando solo lo necesario)."],
     ["festival", "Festivales", "Desde Drama, si un festival sube la producción al menos 5 %."],
@@ -1802,7 +1822,7 @@
     var h = "";
     if (P.auto) h += "<div style='color:#7fd19b;font-size:11.5px;cursor:help' title=\"" + attr(rk ? "Candidatos:\n" + rk : "") + "\">Modo edificios: el que tarda menos</div>";
     if (P.deCola) h += "<div style='color:#7fd19b;font-size:11.5px'>De la cola (1 de " + d.cola.length + ")</div>";
-    h += "<div style='margin:6px 0 2px;font-size:13.5px" + (sinAy ? ";cursor:help" : "") + "' title=\"" + attr(sinAy) + "\"><b>" + P.label + "</b> — <b style='color:#7fd19b'>" + tiempoPlan(P.sim) + "</b>" + textoCorregido(P.sim) + "</div>";
+    h += "<div style='margin:6px 0 2px;font-size:13.5px" + (sinAy ? ";cursor:help" : "") + "' title=\"" + attr(sinAy) + "\"><b>" + P.label + "</b> — <b style='color:#7fd19b' title='" + (d.ejecutando ? "Baja cada 2 s; se vuelve a calcular cada 5 min y tras cada compra" : "") + "'>" + textoRestante(P) + "</b>" + textoCorregido(P.sim) + "</div>";
     if (mantActivo2(P)) h += "<div style='color:#9aa3b2;font-size:11.5px'>Manteniendo andando: " + nombresConv(P.M) + "</div>";
     // avisos importantes: siempre a la vista
     (P.avisos || []).forEach(function (a) { h += "<div style='color:#e0b050;font-size:12px;margin-top:3px'>⚠ " + a + "</div>"; });
