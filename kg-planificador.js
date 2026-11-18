@@ -489,7 +489,9 @@
   // edificios que gastan recursos y el juego apagó (p. ej. Magnetos sin oil): se vuelven a encender si hay insumos
   // edificios que la usuaria apagó a mano: no se vuelven a encender y el plan se recalcula sin ellos
   var onPrev = null;
+  var APAGA_JUEGO = { smelter: 1, magneto: 1, reactor: 1 }; // los únicos que el juego apaga solo (buildings.js); el resto (Mints…) solo lo apaga ella
   function faltaInsumo(b) { // el juego los apaga solo cuando se acaba un insumo (p. ej. Magnetos sin oil)
+    if (!APAGA_JUEGO[b.name]) return false;
     var ef = b.effects || {};
     return Object.keys(ef).some(function (k) {
       if (!/PerTick(Con)?$/.test(k) || !(ef[k] < 0)) return false;
@@ -533,7 +535,7 @@
   function encenderConsumidores() {
     game.bld.buildingsData.forEach(function (b) {
       if (!b.val || typeof b.on !== "number" || b.on >= b.val) return;
-      if ((d.apagadosMano || {})[b.name]) return; // lo apagó ella
+      if ((d.apagadosMano || {})[b.name] || !APAGA_JUEGO[b.name]) return; // lo apagó ella (o el juego nunca lo apaga solo)
       var ef = b.effects || {}, ins = Object.keys(ef).filter(function (k) { return /PerTick(Con)?$/.test(k) && ef[k] < 0; });
       if (!ins.length) return;
       var hay = ins.every(function (k) {
