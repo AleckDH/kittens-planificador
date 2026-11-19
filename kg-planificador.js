@@ -729,6 +729,9 @@
       if (vuelta && t >= vuelta.t - 1e-6) { M = vuelta.M; vuelta = null; alloc = null; } // terminó el festival
       if (kRes !== k) { // lo que el resto del plan necesita: los automáticos de la simulación no lo tocan
         kRes = k; resRaw = faltante({}, items.slice(k).map(function (x) { return x.p; }));
+        // lo fabricado que piden directo (parchment del festival, slabs, plates…) también: antes los manuscripts simulados
+        // se comían el parchment del festival y juntarlo daba 5 h en vez de ~15 min
+        items.slice(k).forEach(function (x) { x.p.forEach(function (y) { if (esFab(y.name)) resRaw[y.name] = (resRaw[y.name] || 0) + y.val; }); });
         est.z = zebras((st.ship || 0) - est.barcos0);
       }
       if (alloc === null || t - ultPol >= SIM_REPARTO_SEG) {
@@ -742,6 +745,7 @@
       }
       // fabricar en cadena lo que pide la compra actual (sin tocar lo fabricado que el edificio pide directo)
       var pr = items[k].p, reserva = Object.assign({}, col); // al fabricar tampoco se toca la reserva de insumos
+      reserva.furs = (reserva.furs || 0) + A.RESERVA_FURS; // ni los furs que siempre se dejan (como fabricarHacia)
       pr.forEach(function (y) { if (esFab(y.name)) reserva[y.name] = (reserva[y.name] || 0) + y.val; });
       pr.forEach(function (x) {
         if (!esFab(x.name)) return;
@@ -1335,6 +1339,7 @@
   // fabrica en cadena hacia los precios del paso actual
   function fabricarHacia(p) {
     var reservaFab = colchones(); // tampoco fabrica gastando los insumos de Smelters, Magnetos, etc.
+    reservaFab.furs = (reservaFab.furs || 0) + A.RESERVA_FURS; // ni los furs que siempre se dejan (antes un paso con parchment los dejaba en 0)
     p.forEach(function (y) { if (esFab(y.name)) reservaFab[y.name] = y.val; });
     function hacer(n, cant, nivel) {
       if (cant <= 0 || nivel > 6) return;
@@ -1468,7 +1473,7 @@
       var r = R(x.name); if (!r || r.value >= x.val - 1e-6) return;
       var por = (game.getResourcePerTick(x.name, true) || 0) * tps(), falta = x.val - r.value;
       partes.push(titulo(x.name) + " " + num(r.value) + " / " + num(x.val) + " (" +
-        (r.maxValue > 0 && x.val > r.maxValue ? "no cabe: tope " + num(r.maxValue) : por > 1e-9 ? "+" + num(por) + "/s → " + tiempo(falta / por) : por < -1e-9 ? "baja " + num(-por) + "/s" : "no se produce") + ")");
+        (r.maxValue > 0 && x.val > r.maxValue ? "no cabe: tope " + num(r.maxValue) : esFab(x.name) && !(por > 1e-9) ? "se fabrica con " + Object.keys(rec(x.name).porVez).map(titulo).join(" + ") : por > 1e-9 ? "+" + num(por) + "/s → " + tiempo(falta / por) : por < -1e-9 ? "baja " + num(-por) + "/s" : "no se produce") + ")");
     });
     return partes.join(" · ");
   }
@@ -1479,7 +1484,12 @@
     var pct = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1;
     if (p.type === "trade") pct += (p.kHechos || 0) * 1e-3; // cada trato hecho cuenta como avance
     if (p.type === "ship") pct -= (p.veces || 0) * 1e-3;
-    if (atasco.paso !== p) { atasco.paso = p; atasco.mejor = pct; atasco.desde = segundos; d.atasco = null; return; } // paso nuevo
+    var clave = p.type + "|" + p.name;
+    if (atasco.paso !== p) { // paso nuevo; si es el mismo recalculado (tras el aviso), el aviso queda a la vista hasta que avance
+      var mismo = atasco.clave === clave; atasco.paso = p; atasco.clave = clave; atasco.mejor = pct;
+      if (!mismo) { atasco.desde = segundos; d.atasco = null; }
+      return;
+    }
     if (pct > atasco.mejor + 0.001) { // avanzó: todo bien
       atasco.mejor = pct; atasco.desde = segundos;
       if (d.atasco) { d.atasco = null; anotar("El paso volvió a avanzar"); }
