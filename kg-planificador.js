@@ -27,6 +27,8 @@
     COLA_RETRASO_PCT: 0.05, // una ayuda para las metas siguientes de la cola no puede atrasar la meta actual más que esto
     PREFAB_PCT: 0.9,       // cola: con el insumo sobre este % del tope, fabrica lo que piden las metas siguientes…
     PREFAB_DEJAR_PCT: 0.75, // …sin bajarlo de este % (no le quita nada a la meta actual)
+    ATASCO_SEG: 120,       // si el paso actual no avanza en este tiempo: aviso con lo que falta según el juego…
+    ATASCO_RECALC_SEG: 600, // …y recalcula (como mucho una vez cada tanto, para no quedar en un bucle)
     LIMPIA_MIN_PCT: 0.01,  // medioambiente: el modo edificios prefiere un edificio que baje al menos este % de la pollution que entra
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
     EDIFICIOS_EXCLUIR: ["unicornPasture"] // la Unicorn Pasture la decide "Invertir unicorns"
@@ -175,6 +177,13 @@
         p: [{ name: "gold", val: z.gold * k }, { name: z.compra, val: z.compraVal * k }, { name: "furs", val: z.catpower * k / cz.costo * cz.furs }] });
     }
     return pasos;
+  }
+  // un trato para la simulación: paga gold y slabs, y su catpower (mp) sale del catpower real más lo que cazan los hunters.
+  // Antes se pagaba con furs: con furs guardados todos los tratos de la cola salían al instante (8 Bio Labs "~ya" con 10 de catpower)
+  function itemTrato(s) {
+    var mp = 0, p = (s.reales || s.p).filter(function (x) { if (x.name === "manpower") { mp += x.val; return false; } return x.name !== "furs"; });
+    if (!mp) { var cz = caza(), f = (s.p || []).filter(function (x) { return x.name === "furs"; })[0]; if (f) mp = f.val / cz.furs * cz.costo; } // plan de antes
+    return { p: p, gana: s.gana, mp: mp };
   }
 
   // =================== MEDICIÓN DE PRODUCCIÓN ===================
@@ -674,6 +683,10 @@
     var col = colchones(); // la compra deja la reserva de insumos de los edificios que consumen
     var hist = [], resRaw = null, kRes = -1;
     var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value, ritmo: mantActivo() && esAuto() ? slabsParaTratos(M) : {}, cuenta: {} };
+    // catpower para los tratos: el de ahora más lo que juntan los hunters (en M, lo que cazan figura como furs)
+    var mp = R("manpower").value, mpCap = isFinite(cap.manpower) ? cap.manpower : Infinity;
+    var mpPide = function (it) { return it.mp ? Math.min(it.mp, mpCap * 0.9) : 0; };
+    var mpRitmo = function () { return Object.keys(alloc || {}).reduce(function (s, j) { return s + alloc[j] * (((M.m[j] || {}).furs) || 0); }, 0) * est.cz.costo / Math.max(1e-9, est.cz.furs); };
     var hacer = function (n, cant, nivel, reserva) {
       if (cant <= 1e-9 || nivel > 6) return;
       var rc = rec(n), pv = rc.porVez, veces = Math.ceil(cant / rc.rinde - 1e-6); // por tandas enteras, como el juego
@@ -694,7 +707,9 @@
       }
       if (alloc === null || t - ultPol >= SIM_REPARTO_SEG) {
         // el reparto apunta a la compra que sigue (lo que tiene tope no se puede juntar por adelantado)
-        var na = politica(M, st, [items[k].p], alloc ? Object.keys(alloc)[0] : null, items.slice(k + 1).map(function (x) { return x.p; })), nj = Object.keys(na)[0];
+        var pPol = items[k].p, mpDef = Math.max(0, mpPide(items[k]) - mp);
+        if (mpDef > 0) pPol = pPol.concat([{ name: "furs", val: (st.furs || 0) + mpDef / est.cz.costo * est.cz.furs }]); // falta catpower: hunters
+        var na = politica(M, st, [pPol], alloc ? Object.keys(alloc)[0] : null, items.slice(k + 1).map(function (x) { return x.p; })), nj = Object.keys(na)[0];
         var ue = ultimaEtapa || {}, ult = etapas[etapas.length - 1];
         if (!ult || ult.job !== nj || ult.paso !== k || ult.recurso !== ue.recurso) etapas.push({ job: nj, desde: t, paso: k, recurso: ue.job === nj ? ue.recurso : null });
         alloc = na; rates = tasas(M, alloc); ultPol = t;
@@ -708,9 +723,9 @@
         reserva[x.name] = 0; hacer(x.name, falta, 0, reserva); reserva[x.name] = x.val;
       });
       var compro = false;
-      while (k < items.length && items[k].p.every(function (x) { return (st[x.name] || 0) >= x.val + colPara(col, x, cap[x.name]) - 1e-6; })) {
+      while (k < items.length && mp >= mpPide(items[k]) - 1e-6 && items[k].p.every(function (x) { return (st[x.name] || 0) >= x.val + colPara(col, x, cap[x.name]) - 1e-6; })) {
         items[k].p.forEach(function (x) { st[x.name] -= x.val; });
-        var it = items[k];
+        var it = items[k]; mp = Math.max(0, mp - mpPide(it));
         if (it.cap) Object.keys(it.cap).forEach(function (r) { cap[r] = (cap[r] || 0) + it.cap[r]; });
         if (it.gana) Object.keys(it.gana).forEach(function (r) { st[r] = Math.min(isFinite(cap[r]) ? cap[r] : Infinity, (st[r] || 0) + it.gana[r]); });
         if (it.M) M = it.M;
@@ -722,6 +737,8 @@
       var dt = Math.min(SIM_MAX_SALTO, SIM_REPARTO_SEG - (t - ultPol), limite - t);
       var fa = faltante(sinCol(st, col), [items[k].p]), tAlc = 0;
       Object.keys(fa).forEach(function (r) { tAlc = Math.max(tAlc, (net[r] || 0) > 1e-9 ? fa[r] / net[r] : Infinity); });
+      var mpR = mpRitmo(), mpN = mpPide(items[k]);
+      if (mpN > mp && mpR > 1e-9) tAlc = Math.max(tAlc, (mpN - mp) / mpR); else if (mpN > mp) tAlc = Infinity;
       if (tAlc > 0) dt = Math.min(dt, tAlc);
       Object.keys(net).forEach(function (r) {
         var v = net[r], s = st[r] || 0;
@@ -731,6 +748,7 @@
       dt = Math.max(SIM_MIN_SALTO, dt);
       Object.keys(net).forEach(function (r) { st[r] = Math.max(0, Math.min(isFinite(cap[r]) ? cap[r] : Infinity, (st[r] || 0) + net[r] * dt)); });
       automaticosSim(st, cap, net, nn.sobra, dt, resRaw, col, t, est);
+      mp = Math.min(mpCap, mp + mpR * dt);
       hist.push({ dt: dt, net: net });
       t += dt;
     }
@@ -982,7 +1000,7 @@
       var tr = pasosComercio(faltaTi, extra);
       var paso = { type: "ship", name: "ship", veces: veces, barcos: extra, motivo: "barcos",
         p: porVez.map(function (x) { return { name: x.name, val: x.val * veces }; }), gana: { ship: extra } };
-      var items = prev.concat([{ p: paso.p, gana: paso.gana }]).concat(tr.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
+      var items = prev.concat([{ p: paso.p, gana: paso.gana }]).concat(tr.map(itemTrato)).concat([{ p: pMeta }]);
       var t = tcomp(simular(M, items));
       await esperar();
       var ref = mejor ? mejor.t : tBase;
@@ -1121,7 +1139,7 @@
       var tiAhora = faltante(stock, acum).titanium || 0, tiEsta = tiAhora - tiAntes; tiAntes = tiAhora;
       if (tiEsta > 0) {
         var tr = pasosComercio(tiEsta); if (!tr.length) break; // sin Zebras no se llega: se calcula al llegar
-        tr.forEach(function (x) { out.push({ p: x.p, gana: x.gana }); });
+        tr.forEach(function (x) { out.push(itemTrato(x)); });
       }
       out.push({ p: s.p, meta: s.i });
     }
@@ -1141,7 +1159,7 @@
     var faltaTi = faltante(stock0, alm.pasos.map(function (s) { return s.p; }).concat([pMeta])).titanium || 0;
     var tratos = pasosComercio(faltaTi);
     var itemsAlm = alm.pasos.map(function (s) { return { p: s.p, cap: s.cap }; });
-    var items = itemsAlm.concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
+    var items = itemsAlm.concat(tratos.map(itemTrato)).concat([{ p: pMeta }]);
     var base = simular(M, items, null, null), tAhora = tcomp(base);
     var tAhoraSinNada = tAhora; // para mostrar cuánto ahorran barcos y ayudas
     // ¿conviene fabricar barcos antes de comerciar?
@@ -1149,7 +1167,7 @@
     if (barcos) {
       tratos = barcos.tratos; pasoBarcos = [barcos.paso]; tAhora = barcos.t;
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
-        .concat(tratos.map(function (s) { return { p: s.p, gana: s.gana }; })).concat([{ p: pMeta }]);
+        .concat(tratos.map(itemTrato)).concat([{ p: pMeta }]);
     }
     // el resto de la cola: las ayudas se eligen para terminar la cola entera antes, sin atrasar esta meta
     var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra);
@@ -1394,6 +1412,42 @@
     d.jobActual = null; d.etapaActual = null; d.reestimar = true; // la etapa siguiente se elige de cero
   }
   // cuánto tienes de lo que pide un paso (los fabricados se cuentan en materias primas)
+  // ---------- atascos (pedido el 2026-11-19): si el paso no avanza en ATASCO_SEG, avisa lo que falta según el juego y recalcula ----------
+  // lo que falta según el juego: lo que pide el paso, lo que tienes y lo que entra por segundo (como la pestaña del edificio)
+  function faltaJuego(p) {
+    var pr = p.type === "trade" ? p.reales : p.p, partes = [];
+    (pr || []).forEach(function (x) {
+      var r = R(x.name); if (!r || r.value >= x.val - 1e-6) return;
+      var por = (game.getResourcePerTick(x.name, true) || 0) * tps(), falta = x.val - r.value;
+      partes.push(titulo(x.name) + " " + num(r.value) + " / " + num(x.val) + " (" +
+        (r.maxValue > 0 && x.val > r.maxValue ? "no cabe: tope " + num(r.maxValue) : por > 1e-9 ? "+" + num(por) + "/s → " + tiempo(falta / por) : por < -1e-9 ? "baja " + num(-por) + "/s" : "no se produce") + ")");
+    });
+    return partes.join(" · ");
+  }
+  var atasco = { paso: null, mejor: -1, desde: 0, recalc: -1e9 };
+  function vigilarAtasco() {
+    if (!d.plan || !d.ejecutando || d.pausa || calculando || !d.plan.pasos.length) { atasco.paso = null; return; }
+    var p = d.plan.pasos[0], av = avancePaso(p);
+    var pct = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1;
+    if (p.type === "trade") pct += (p.kHechos || 0) * 1e-3; // cada trato hecho cuenta como avance
+    if (p.type === "ship") pct -= (p.veces || 0) * 1e-3;
+    if (atasco.paso !== p) { atasco.paso = p; atasco.mejor = pct; atasco.desde = segundos; d.atasco = null; return; } // paso nuevo
+    if (pct > atasco.mejor + 0.001) { // avanzó: todo bien
+      atasco.mejor = pct; atasco.desde = segundos;
+      if (d.atasco) { d.atasco = null; anotar("El paso volvió a avanzar"); }
+      return;
+    }
+    if (segundos - atasco.desde < A.ATASCO_SEG) return;
+    var falta = faltaJuego(p), quien = sinHtml(textoPaso(p));
+    d.atasco = "Trabado hace " + tiempo(segundos - atasco.desde) + ": " + quien + (falta ? ". Según el juego falta: " + falta : ". Según el juego no falta nada: no pude comprarlo");
+    atasco.desde = segundos; // vuelve a mirar en otro ATASCO_SEG
+    anotar("⚠ " + d.atasco);
+    if (segundos - atasco.recalc >= A.ATASCO_RECALC_SEG) { // recalcula (como mucho una vez cada 10 min, para no quedar en un bucle)
+      atasco.recalc = segundos; anotar("Recalculo el plan por el atasco");
+      recalcular().then(function () { atasco.paso = null; guardar(); vista = pintarPlan(); pintar(); })
+        .catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
+    }
+  }
   function avancePaso(p) {
     var pr = p.type === "trade" ? p.reales : p.p; if (!pr || !pr.length) return [];
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
@@ -1490,7 +1544,7 @@
     game.updateCaches(); topes(); // el juego sube los topes recién en su próximo tick: sin esto, tras comprar un edificio de almacenamiento decía "no cabe"
     var iMeta = -1; P.pasos.forEach(function (p, i) { if (iMeta < 0 && p.motivo === "meta") iMeta = i; });
     var items = (iMeta >= 0 ? P.pasos.slice(0, iMeta + 1) : P.pasos).map(function (p) { // el tiempo es hasta la meta (las ayudas para la cola van después)
-      if (p.type === "trade") return { p: p.p, gana: p.gana };
+      if (p.type === "trade") return itemTrato(p);
       return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
     });
     P.sim = simular(medirSeguro(), items);
@@ -2030,6 +2084,7 @@
     h += "<div style='margin:6px 0 2px;font-size:13.5px" + (sinAy ? ";cursor:help" : "") + "' title=\"" + attr(sinAy) + "\"><b>" + P.label + "</b> — <b style='color:#7fd19b' title='" + (d.ejecutando ? "Baja cada 2 s; se vuelve a calcular cada 5 min y tras cada compra" : "") + "'>" + textoRestante(P) + "</b>" + textoCorregido(P.sim) + "</div>";
     if (mantActivo2(P)) h += "<div style='color:#9aa3b2;font-size:11.5px'>Manteniendo andando: " + nombresConv(P.M) + "</div>";
     // avisos importantes: siempre a la vista
+    if (d.atasco && d.ejecutando) h += "<div style='color:#e57373;font-size:12px;margin-top:3px'>⚠ " + d.atasco + "</div>";
     (P.avisos || []).forEach(function (a) { h += "<div style='color:#e0b050;font-size:12px;margin-top:3px'>⚠ " + a + "</div>"; });
     if (P.imposible) h += "<div style='color:#e57373'>No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", ") + ".</div>";
     if (P.sinZebras) h += "<div style='color:#e57373'>Faltan " + num(P.faltaTi) + " de titanium y no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco).</div>";
@@ -2345,6 +2400,7 @@
     if (calculando) return;
     try { automaticos(); } catch (e) { console.error("[Planificador auto]", e); }
     try { pasoEjecutar(); } catch (e) { console.error("[Planificador plan]", e); anotar("Error: " + e.message); }
+    if (segundos % 5 === 4) try { vigilarAtasco(); } catch (e) { console.error("[Planificador atasco]", e); }
     if (d.plan && d.ejecutando && !d.pausa && (d.reestimar || segundos - ultimaReestimacion >= 300)) {
       ultimaReestimacion = segundos; d.reestimar = false;
       try { reestimar(); } catch (e) { console.error("[Planificador reestimar]", e); }
