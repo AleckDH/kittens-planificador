@@ -388,23 +388,38 @@
     Object.keys(extra).forEach(function (r) { if (extra[r] > 0) o[r] = (o[r] || 0) + extra[r]; });
     return o;
   }
-  function politica(M, st, preciosLista, jobActual) {
+  function estaLleno(r, st) { var tope = R(r) && R(r).maxValue; return tope > 0 && (st[r] || 0) >= tope * 0.99; }
+  // despues: los precios de los pasos (y metas de la cola) que siguen; se usan solo si para el paso actual
+  // ningún oficio sirve (lo que falta no depende de gatitos o ya está lleno, p. ej. science a tope por los eventos del cielo)
+  function politica(M, st, preciosLista, jobActual, despues) {
     var stc = sinCol(st, colchones()); // la reserva de insumos no cuenta como disponible
-    var falta = pasarConversores(M, faltante(stc, preciosLista), stc), peor = null, pt = -1, N = M.N, porJob = {}, recJob = {};
-    var cons = consumoConv(M);
-    falta = conConsumo(M, falta, cons, stc, preciosLista);
-    Object.keys(falta).forEach(function (r) {
-      var j = mejorJob(M, r); if (!j) return;
-      var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N - (cons[r] || 0));
-      // un recurso lleno que todavía "falta" (no se puede fabricar con él por ahora) no sirve para seguir en ese oficio
-      var tope = R(r) && R(r).maxValue, lleno = tope > 0 && (st[r] || 0) >= tope * 0.99;
-      if (!lleno && v > (porJob[j] || 0)) { porJob[j] = v; recJob[j] = r; }
-      if (!lleno && v > pt) { pt = v; peor = j; }
-    });
+    var N = M.N, cons = consumoConv(M);
+    function etapa(lista) {
+      var falta = conConsumo(M, pasarConversores(M, faltante(stc, lista), stc), cons, stc, lista), peor = null, pt = -1, porJob = {}, recJob = {};
+      Object.keys(falta).forEach(function (r) {
+        var j = mejorJob(M, r); if (!j) return;
+        var v = falta[r] / Math.max(1e-9, (M.base[r] || 0) + M.m[j][r] * N - (cons[r] || 0));
+        // un recurso lleno que todavía "falta" (no se puede fabricar con él por ahora) no sirve para seguir en ese oficio
+        if (estaLleno(r, st)) return;
+        if (v > (porJob[j] || 0)) { porJob[j] = v; recJob[j] = r; }
+        if (v > pt) { pt = v; peor = j; }
+      });
+      return { peor: peor, porJob: porJob, recJob: recJob, falta: falta };
+    }
+    var e = etapa(preciosLista), peor = e.peor;
     // una etapa a la vez: se queda en el oficio actual hasta juntar todo lo de ese oficio, y recién ahí cambia
-    if (jobActual && porJob[jobActual] > 0) peor = jobActual;
-    ultimaEtapa = { job: peor, recurso: peor ? recJob[peor] : null, falta: peor ? falta[recJob[peor]] : 0 };
-    if (!peor) peor = M.jobs.indexOf("scholar") >= 0 ? "scholar" : M.jobs[0];
+    if (jobActual && e.porJob[jobActual] > 0) peor = jobActual;
+    if (!peor && despues && despues.length) { // nada que juntar para este paso: adelanta lo que piden los siguientes
+      e = etapa(preciosLista.concat(despues)); peor = e.peor;
+      if (jobActual && e.porJob[jobActual] > 0) peor = jobActual;
+    }
+    ultimaEtapa = { job: peor, recurso: peor ? e.recJob[peor] : null, falta: peor ? e.falta[e.recJob[peor]] : 0 };
+    if (!peor) { // ni eso: a un oficio que produzca algo que no esté lleno (antes iban todos a scholar, con la science a tope)
+      var sirve = function (j) { return j && M.m[j] && Object.keys(M.m[j]).some(function (r) { return M.m[j][r] > 0 && r !== "catnip" && !estaLleno(r, st); }); };
+      var orden = [jobActual, "scholar", "woodcutter", "miner", "geologist", "hunter"].concat(M.jobs);
+      for (var io = 0; io < orden.length && !peor; io++) if (M.jobs.indexOf(orden[io]) >= 0 && sirve(orden[io])) peor = orden[io];
+      if (!peor) peor = M.jobs.indexOf("scholar") >= 0 ? "scholar" : M.jobs[0];
+    }
     // primero los gatitos que mantienen andando lo escaso (gold, titanium); el resto, a la meta
     var mant = mantenimiento(M), usados = 0, a = {};
     a[peor] = 0;
@@ -671,7 +686,7 @@
       }
       if (alloc === null || t - ultPol >= SIM_REPARTO_SEG) {
         // el reparto apunta a la compra que sigue (lo que tiene tope no se puede juntar por adelantado)
-        var na = politica(M, st, [items[k].p], alloc ? Object.keys(alloc)[0] : null), nj = Object.keys(na)[0];
+        var na = politica(M, st, [items[k].p], alloc ? Object.keys(alloc)[0] : null, items.slice(k + 1).map(function (x) { return x.p; })), nj = Object.keys(na)[0];
         var ue = ultimaEtapa || {}, ult = etapas[etapas.length - 1];
         if (!ult || ult.job !== nj || ult.paso !== k || ult.recurso !== ue.recurso) etapas.push({ job: nj, desde: t, paso: k, recurso: ue.job === nj ? ue.recurso : null });
         alloc = na; rates = tasas(M, alloc); ultPol = t;
@@ -1237,7 +1252,8 @@
     var M = medirSeguro(); if (mantActivo()) ajustarMantenimiento(M); // mira cómo vienen los insumos con el reparto que había
     d.ritmoTratos = esAuto() ? slabsParaTratos(M) : {}; // lo que se junta por segundo para los slabs de los tratos (modo edificios)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
-    var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual); // en un trato, p incluye los furs que cuesta su catpower
+    var despues = d.plan.pasos.slice(1).map(function (p) { return p.p; }).concat(!d.plan.deCola ? [] : d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
+    var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual, despues); // en un trato, p incluye los furs que cuesta su catpower
     d.etapaActual = ultimaEtapa ? Object.assign({}, ultimaEtapa) : null; // para mostrar qué se está juntando
     d.jobActual = Object.keys(a)[0];
     var asig = asignar(M, a), kittens = game.village.sim.kittens, cambios = 0;
