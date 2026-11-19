@@ -328,7 +328,13 @@
       var hay = n in pool ? pool[n] : (st[n] || 0), usa = Math.min(hay, cant);
       pool[n] = hay - usa; cant -= usa;
       if (cant <= 1e-9) return;
-      if (esFab(n)) { var ins = insumo(n); Object.keys(ins).forEach(function (q) { pedir(q, ins[q] * cant); }); }
+      if (esFab(n)) {
+        // el juego fabrica por tandas enteras: si falta 0,056 de concrete hay que juntar una tanda completa
+        // (2500 slab + 25 steel); contando fracciones pedía unos pocos slabs y el plan quedaba trabado
+        var r = rec(n), veces = Math.ceil(cant / r.rinde - 1e-6);
+        pool[n] = (pool[n] || 0) + Math.max(0, veces * r.rinde - cant); // lo que sobra de la tanda sirve para lo que sigue
+        Object.keys(r.porVez).forEach(function (q) { pedir(q, r.porVez[q] * veces); });
+      }
       else falta[n] = (falta[n] || 0) + cant;
     }
     preciosLista.forEach(function (p) { p.forEach(function (x) { pedir(x.name, x.val); }); });
@@ -668,15 +674,15 @@
     var est = { ultSteel: 0, z: null, cz: caza(), barcos0: R("ship").value, ritmo: mantActivo() && esAuto() ? slabsParaTratos(M) : {}, cuenta: {} };
     var hacer = function (n, cant, nivel, reserva) {
       if (cant <= 1e-9 || nivel > 6) return;
-      var ins = insumo(n);
-      Object.keys(ins).forEach(function (q) {
+      var rc = rec(n), pv = rc.porVez, veces = Math.ceil(cant / rc.rinde - 1e-6); // por tandas enteras, como el juego
+      Object.keys(pv).forEach(function (q) {
         if (!esFab(q)) return;
-        var nec = ins[q] * cant + (reserva[q] || 0) - (st[q] || 0);
+        var nec = pv[q] * veces + (reserva[q] || 0) - (st[q] || 0);
         if (nec > 0) hacer(q, nec, nivel + 1, reserva);
       });
-      var mm = cant;
-      Object.keys(ins).forEach(function (q) { mm = Math.min(mm, Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / ins[q]); });
-      if (mm > 0) { Object.keys(ins).forEach(function (q) { st[q] -= ins[q] * mm; }); st[n] = (st[n] || 0) + mm; }
+      var mm = veces;
+      Object.keys(pv).forEach(function (q) { mm = Math.min(mm, Math.floor(Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / pv[q] + 1e-9)); });
+      if (mm > 0) { Object.keys(pv).forEach(function (q) { st[q] -= pv[q] * mm; }); st[n] = (st[n] || 0) + mm * rc.rinde; }
     };
     var guardia = 0;
     while (k < items.length && t < limite && guardia++ < 200000) {
