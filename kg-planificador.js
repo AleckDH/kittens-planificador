@@ -1251,7 +1251,8 @@
       var c = game.workshop.getCraft(n); if (!c || !c.unlocked) return;
       var resP = Object.assign({}, res), sirve = true;
       game.workshop.getCraftPrice(c).forEach(function (x) {
-        var r = R(x.name); if (esFab(x.name)) return; // lo fabricado se usa si sobra (respetando la reserva)
+        var r = R(x.name);
+        if (esFab(x.name)) { resP[x.name] = Math.max(resP[x.name] || 0, resMeta[x.name] || 0); return; } // lo fabricado se usa si sobra (nunca lo de la meta actual)
         if (!(r.maxValue > 0) || r.value < r.maxValue * A.PREFAB_PCT) { sirve = false; return; } // solo con lo que se va a desbordar
         resP[x.name] = Math.max(resP[x.name] || 0, r.maxValue * A.PREFAB_DEJAR_PCT);
       });
@@ -1262,11 +1263,12 @@
     if (hecho.length) anotar("Cola: fabriqué " + hecho.join(", ") + " para las metas siguientes");
   }
   function libre(n, res) { return R(n).value - ((res || {})[n] || 0); }
-  // cuánto de un fabricado (p. ej. steel) le falta todavía al plan y a la cola, contando lo que ya hay
+  // cuánto de un fabricado (p. ej. steel) le falta todavía a la meta actual, contando lo que ya hay.
+  // Solo la meta actual: con la cola, fabricar concrete para las metas siguientes liberaba las slabs
+  // reservadas para la Mansion en curso y nunca la compraba (2026-11-19).
   function pidePlan(n) {
     if (!d.plan || !d.ejecutando) return 0;
     var listas = d.plan.pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; });
-    if (d.plan.deCola) listas = listas.concat(d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
     var pool = {}, dem = 0;
     function pedir(x, cant, nivel) {
       if (cant <= 1e-9 || nivel > 8) return;
