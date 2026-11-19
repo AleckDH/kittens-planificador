@@ -75,7 +75,8 @@
     if (s < 1.5) return "ya";
     if (s < 60) return Math.round(s) + " s";
     if (s < 3600) return Math.round(s / 60) + " min";
-    return Math.floor(s / 3600) + " h " + Math.round((s % 3600) / 60) + " min";
+    var m = Math.round(s / 60); // redondeado primero: antes salía "5 h 60 min"
+    return Math.floor(m / 60) + " h " + (m % 60) + " min";
   }
   function tiempoSeg(s) { // para la cuenta regresiva: con segundos bajo la hora, así se ve que baja
     if (s >= 3600 || !isFinite(s)) return tiempo(s);
@@ -1552,9 +1553,9 @@
   function attr(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
   function sinHtml(s) { return String(s || "").replace(/<[^>]+>/g, ""); }
   // sección que se despliega con un clic (recuerda si quedó abierta)
-  function det(k, tt, inner, defOpen, estilo) {
+  function det(k, tt, inner, defOpen, estilo, tip) {
     var open = k in abiertos ? abiertos[k] : defOpen;
-    return "<details data-det='" + k + "' style='margin-top:6px'" + (open ? " open" : "") + "><summary style='cursor:pointer" + (estilo ? ";" + estilo : "") + "'><b>" + tt + "</b></summary>" +
+    return "<details data-det='" + k + "' style='margin-top:6px'" + (open ? " open" : "") + "><summary" + (tip ? " title=\"" + attr(tip) + "\"" : "") + " style='cursor:pointer" + (estilo ? ";" + estilo : "") + "'><b>" + tt + "</b></summary>" +
       "<div style='margin:2px 0 0 12px'>" + inner + "</div></details>";
   }
   function textoEtapas(P, i) {
@@ -1571,22 +1572,45 @@
     }).join(""), false, "color:#7fd19b;font-size:11.5px");
     var filas = P.pasos.map(function (p, i) {
       var actual = i === 0 && d.ejecutando, et = textoEtapas(P, i);
-      var tip = et ? "Etapas (todos los libres a un oficio a la vez):\n" + et : "";
-      var f = "<div title=\"" + attr(tip) + "\" style='margin-top:3px" + (actual ? ";color:#fff" : "") + (tip ? ";cursor:help" : "") + "'>" +
-        (actual ? "▶ " : "<span style='color:#9aa3b2'>" + (i + 1) + ".</span> ") + textoPaso(p) + "</div>";
-      if (actual) {
-        var av = avancePaso(p), tot = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1, ea = d.etapaActual;
-        var tipAv = av.map(function (x) { return titulo(x.r) + ": " + Math.round(x.pct * 100) + " %" + (x.falta > 0 ? " (faltan " + num(x.falta) + ")" : ""); }).join("\n");
-        f += "<div title=\"" + attr(tipAv) + "\" style='font-size:11.5px;margin-left:14px;cursor:help'>" + barra(tot) + Math.round(tot * 100) + " %" +
-          (p.type === "trade" ? " · faltan " + p.k + " tratos" : p.type === "ship" ? " · faltan " + p.veces + " fabricaciones" : "") +
-          (ea && ea.job ? " · <span style='color:#c8cdd6'>todos a <b>" + (JT[ea.job] || ea.job) + "</b>" + (ea.recurso ? " (" + titulo(ea.recurso) + ")" : "") + "</span>" : "") + "</div>";
-      }
+      var tip = sinHtml(textoPaso(p)) + (et ? "\n\nEtapas (todos los libres a un oficio a la vez):\n" + et : "");
+      var f = "<div title=\"" + attr(tip) + "\" style='margin-top:2px;cursor:help" + (actual ? ";color:#fff" : "") + "'>" +
+        (actual ? "▶ " : "<span style='color:#9aa3b2'>" + (i + 1) + ".</span> ") + cortoPaso(p) + "</div>";
+      if (actual) f += progresoPaso(p, 14);
       return f;
     });
+    // un solo paso (la meta): sin lista, solo la barra (el nombre ya está arriba y en la cola)
+    if (P.pasos.length === 1 && P.pasos[0].motivo === "meta" && !hechos.length) return d.ejecutando ? progresoPaso(P.pasos[0], 0) : "";
     var MAX = 5;
     h += filas.slice(0, MAX).join("");
-    if (filas.length > MAX) h += det("pasosMas", (filas.length - MAX) + " pasos más", filas.slice(MAX).join(""), false, "color:#9aa3b2;font-size:11.5px");
-    return det("pasos", "Pasos (" + P.pasos.length + ")", h + "<div style='color:#9aa3b2;font-size:11px;margin-top:3px'>Pasa el mouse sobre un paso para ver sus etapas.</div>", true);
+    if (filas.length > MAX) h += det("pasosMas", (filas.length - MAX) + " más", filas.slice(MAX).join(""), false, "color:#9aa3b2;font-size:11.5px");
+    return det("pasos", "Pasos (" + P.pasos.length + ")", h, true, "", "Pasa el mouse sobre un paso para ver el detalle y sus etapas");
+  }
+  // barra de avance del paso actual y a qué oficio van los libres (el detalle por recurso, en el tooltip)
+  function progresoPaso(p, margen) {
+    var av = avancePaso(p), tot = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1, ea = d.etapaActual;
+    var tipAv = av.map(function (x) { return titulo(x.r) + ": " + Math.round(x.pct * 100) + " %" + (x.falta > 0 ? " (faltan " + num(x.falta) + ")" : ""); }).join("\n") +
+      (p.type === "trade" ? "\nFaltan " + p.k + " tratos" : p.type === "ship" ? "\nFaltan " + p.veces + " fabricaciones" : "") +
+      (ea && ea.job ? "\nTodos los libres a " + (JT[ea.job] || ea.job) + (ea.recurso ? ", juntando " + titulo(ea.recurso) : "") : "");
+    return "<div title=\"" + attr(tipAv) + "\" style='font-size:11.5px;margin-left:" + margen + "px;cursor:help;color:#c8cdd6'>" + barra(tot) + Math.round(tot * 100) + " %" +
+      (ea && ea.job ? " · " + (JT[ea.job] || ea.job) + (ea.recurso ? " (" + titulo(ea.recurso) + ")" : "") : "") + "</div>";
+  }
+  // un paso en pocas palabras (el detalle va en el tooltip, con textoPaso)
+  function cortoPaso(p) {
+    var g = function (t) { return " <span style='color:#9aa3b2;font-size:11.5px'>" + t + "</span>"; };
+    if (p.type === "trade") return "Zebras ×" + (p.k > 0 ? p.k : (p.kHechos || 0)) + g("~" + num(p.gana.titanium) + " titanium");
+    if (p.type === "ship") return "Barcos ×" + Math.round(p.veces * ((rec("ship") || { rinde: 1 }).rinde)) + (p.ahorro > 0 ? g("−" + tiempo(p.ahorro)) : "");
+    if (p.type === "festival") return "Festival" + g(isFinite(p.ahorro) ? "−" + tiempo(p.ahorro) : "");
+    var n = etiqueta(p.type, p.name);
+    if (p.motivo === "meta") return "<b>" + n + "</b>";
+    if (p.motivo === "almacenamiento") return n + g("tope");
+    if (p.motivo === "sostener") return n + g(titulo(p.recurso));
+    if (p.motivo === "adelanta la meta") return n + g((isFinite(p.ahorro) ? "−" + tiempo(p.ahorro) : "necesario") + (p.despues ? ", después" : ""));
+    return n;
+  }
+  // un aviso largo en una línea: hasta los dos puntos; el texto completo, en el tooltip
+  function avisoCorto(txt, color) {
+    var plano = sinHtml(txt), i = plano.indexOf(": "), corto = i > 0 && i < 90 ? plano.slice(0, i) : plano.length > 90 ? plano.slice(0, 87) + "…" : plano;
+    return "<div title=\"" + attr(plano) + "\" style='color:" + color + ";font-size:12px;margin-top:3px;cursor:help;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>⚠ " + attr(corto) + "</div>";
   }
 
   // ---------- estimado vs real ----------
@@ -2206,35 +2230,41 @@
         "<div style='margin-top:4px'><button data-a='edificios' style='" + est + "' title='Sin meta: compra uno tras otro el edificio que tarde menos.'>Solo comprar edificios</button></div>";
     }
     var sinAy = Math.abs(tcomp(P.sim) - P.sinAyuda) > 1 ? "Sin los edificios sugeridos: " + (isFinite(P.sinAyuda) ? (P.sinAyuda > A.HORAS_MAX * 3600 ? "unas " : "") + tiempo(P.sinAyuda) : "nunca a ese ritmo") : "";
-    var h = "";
-    if (P.auto) h += "<div style='color:#7fd19b;font-size:11.5px;cursor:help' title=\"" + attr(rk ? "Candidatos:\n" + rk : "") + "\">Modo edificios: el que tarda menos</div>";
-    if (P.deCola && d.cola.length > 1) h += "<div style='color:#9aa3b2;font-size:11.5px'>Meta 1 de " + d.cola.length + " de la cola" + (P.nSig ? " (el plan mira también las " + P.nSig + " siguientes)" : "") + "</div>";
-    h += "<div style='margin:6px 0 2px;font-size:13.5px" + (sinAy ? ";cursor:help" : "") + "' title=\"" + attr(sinAy) + "\"><b>" + P.label + "</b> — <b style='color:#7fd19b' title='" + (d.ejecutando ? "Baja cada 2 s; se vuelve a calcular cada 5 min y tras cada compra" : "") + "'>" + textoRestante(P) + "</b>" + textoCorregido(P.sim) + "</div>";
-    if (mantActivo2(P)) h += "<div style='color:#9aa3b2;font-size:11.5px'>Manteniendo andando: " + nombresConv(P.M) + "</div>";
-    // avisos importantes: siempre a la vista
-    if (d.atasco && d.ejecutando) h += "<div style='color:#e57373;font-size:12px;margin-top:3px'>⚠ " + d.atasco + "</div>";
-    (P.avisos || []).forEach(function (a) { h += "<div style='color:#e0b050;font-size:12px;margin-top:3px'>⚠ " + a + "</div>"; });
-    if (P.imposible) h += "<div style='color:#e57373'>No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", ") + ".</div>";
-    if (P.sinZebras) h += "<div style='color:#e57373'>Faltan " + num(P.faltaTi) + " de titanium y no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco).</div>";
+    var h = "", gris = function (t, tip) { return "<span style='color:#9aa3b2;font-size:11.5px" + (tip ? ";cursor:help" : "") + "'" + (tip ? " title=\"" + attr(tip) + "\"" : "") + ">" + t + "</span>"; };
+    // encabezado: meta y tiempo; lo demás (cola, mantenimiento, sin ayudas, corrección por el historial) en el tooltip
+    var tipMeta = [P.auto ? "Modo edificios: el que tarda menos" + (rk ? "\nCandidatos:\n" + rk : "") : "",
+      P.deCola && d.cola.length > 1 ? "Meta 1 de " + d.cola.length + " de la cola" + (P.nSig ? "; el plan mira también las " + P.nSig + " siguientes" : "") : "",
+      mantActivo2(P) ? "Manteniendo andando: " + nombresConv(P.M) : "", sinAy, sinHtml(textoCorregido(P.sim)).trim(),
+      d.ejecutando ? "El tiempo baja cada 2 s; se vuelve a calcular cada 5 min y tras cada compra." : ""].filter(Boolean).join("\n");
+    h += "<div style='margin:6px 0 2px;font-size:13.5px;cursor:help' title=\"" + attr(tipMeta) + "\">" + (P.auto ? "🏗 " : "") + "<b>" + P.label + "</b> — <b style='color:#7fd19b'>" + textoRestante(P) + "</b></div>";
+    // avisos: una línea cada uno, el texto completo al pasar el mouse
+    if (d.atasco && d.ejecutando) h += avisoCorto(d.atasco, "#e57373");
+    (P.avisos || []).forEach(function (a) { h += avisoCorto(a, "#e0b050"); });
+    if (P.imposible) h += avisoCorto("No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", "), "#e57373");
+    if (P.sinZebras) h += avisoCorto("Sin Zebras: faltan " + num(P.faltaTi) + " de titanium: no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco)", "#e57373");
     if (!isFinite(P.sim.t) && P.sim.avance) { // no alcanza en el límite: hasta dónde llega
       h += det("avance", "En " + textoLimite() + " llegarías a…", P.sim.avance.slice(0, 5).map(function (x) {
-        return "<div>" + titulo(x.r) + ": " + Math.round(x.pct * 100) + " % <span style='color:#9aa3b2'>(faltan " + num(x.falta) + ", " +
-          (x.noCabe ? "no cabe en tu almacenamiento" : x.porSeg > 1e-9 ? "+" + num(x.porSeg) + "/s → " + tiempo(x.t) + " más" : "no se produce") + ")</span></div>";
+        var tip = "Faltan " + num(x.falta) + "; " + (x.noCabe ? "no cabe en tu almacenamiento" : x.porSeg > 1e-9 ? "+" + num(x.porSeg) + "/s → " + tiempo(x.t) + " más" : "no se produce");
+        return "<div title=\"" + attr(tip) + "\" style='cursor:help'>" + titulo(x.r) + " " + Math.round(x.pct * 100) + " %" + (x.noCabe ? " " + gris("no cabe") : "") + "</div>";
       }).join(""), true, "color:#e0b050");
     }
     h += htmlPasos(P);
-    // por qué tarda: todo el detalle del cálculo, plegado
+    // qué te frena: un recurso por línea; el detalle del cálculo, en tooltips
     var mtP = mantenimiento(P.M), por = "";
     P.porRec.slice(0, 6).forEach(function (x) {
-      por += "<div>" + titulo(x.r) + ": falta " + num(x.falta) + " → " + tiempo(x.t) + " <span style='color:#9aa3b2'>" + (x.solo ? "(no depende de gatitos)" : x.conv ? "(con tus " + x.conv + " a tope)" : "(con " + (JT[x.job] || x.job) + ")") + "</span></div>";
+      var quien = x.solo ? "no depende de gatitos" : x.conv ? x.conv + " a tope" : (JT[x.job] || x.job);
+      por += "<div title=\"" + attr("Falta " + num(x.falta) + " · " + quien) + "\" style='cursor:help'>" + titulo(x.r) + " " + tiempo(x.t) + " " + gris(quien) + "</div>";
     });
-    por += "<div style='color:#9aa3b2;font-size:11.5px;margin-top:4px'>Gatitos: " + P.M.N + " libres + " + P.M.nFijos + " farmers" +
-      (Object.keys(mtP).length ? " · siempre " + textoMant(mtP) + " para mantener " + nombresConv(P.M) : "") + ". Los libres juntan un recurso a la vez.</div>";
-    if (P.festival) por += "<div style='color:#9aa3b2;font-size:11.5px'>Festival: " + (P.festival.conviene ? "uno ahora " + textoAhorro(P.festival.ahorro) + " en la cola (va primero en los pasos)" :
-      "no conviene ahora: la cola " + (isFinite(P.festival.ahorro) && P.festival.ahorro < 0 ? "tardaría " + tiempo(-P.festival.ahorro) + " más (juntar 1500 catpower, 5000 culture y 2500 parchment cuesta más de lo que adelanta)" : "terminaría casi igual") + ". Se vuelve a revisar cada 10 min.") + "</div>";
-    if (P.tratos && P.zebras) por += "<div style='color:#9aa3b2;font-size:11.5px'>Zebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos → ~" + num(P.zebras.ti) + " por trato.</div>";
-    por += "<div style='color:#9aa3b2;font-size:11.5px'>Caza: " + Math.round(P.M.caza.furs) + " furs y " + Math.round(P.M.caza.ivory) + " ivory por caza. Catnip: " + num(P.M.cat.prom) + "/s de promedio, " + num(P.M.cat.invierno) + "/s en invierno. Calculado en " + P.ms + " ms.</div>";
-    h += det("porque", "Qué te frena", por, false);
+    var tipGat = "Los libres juntan un recurso a la vez." + (Object.keys(mtP).length ? "\nSiempre " + textoMant(mtP) + " para mantener " + nombresConv(P.M) + "." : "") +
+      "\nCaza: " + Math.round(P.M.caza.furs) + " furs y " + Math.round(P.M.caza.ivory) + " ivory por caza." +
+      "\nCatnip: " + num(P.M.cat.prom) + "/s de promedio, " + num(P.M.cat.invierno) + "/s en invierno." +
+      (P.tratos && P.zebras ? "\nZebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos → ~" + num(P.zebras.ti) + " por trato." : "") +
+      "\nCalculado en " + P.ms + " ms.";
+    var extra = [gris(P.M.N + " libres + " + P.M.nFijos + " farmers", tipGat)];
+    if (P.festival) extra.push(gris("festival: " + (P.festival.conviene ? "sí" : "no"), P.festival.conviene ? "Uno ahora " + textoAhorro(P.festival.ahorro) + " en la cola: va primero en los pasos." :
+      "No conviene ahora: la cola " + (isFinite(P.festival.ahorro) && P.festival.ahorro < 0 ? "tardaría " + tiempo(-P.festival.ahorro) + " más (juntar 1500 catpower, 5000 culture y 2500 parchment cuesta más de lo que adelanta)" : "terminaría casi igual") + ". Se vuelve a revisar cada 10 min."));
+    por += "<div style='margin-top:3px'>" + extra.join(gris(" · ")) + "</div>";
+    h += det("porque", "Qué te frena", por, false, "", "Lo que más tarda, con todos los libres en el mejor oficio");
     // los botones del plan de la cola están en la cola; el modo edificios tiene los suyos
     if (P.auto) h += "<div style='margin-top:6px'>" + botonesMarcha() + "</div>";
     return h;
@@ -2267,8 +2297,8 @@
       var esPlan = i === 0 && d.plan && d.plan.deCola && !d.plan.metaHecha && d.plan.type === c.type && d.plan.name === c.name;
       var activo = esPlan && d.ejecutando;
       var t = esPlan && isFinite(tcomp(d.plan.sim)) ? (d.ejecutando ? restante(d.plan) : tcomp(d.plan.sim)) : e && e.t ? tiempoCola(e) : null;
-      var txt = t !== null && isFinite(t) ? (e && e.aprox ? "unas " : "~") + tiempo(Math.max(1, t)) : e && e.tope ? "falta tope" : e && e.nunca ? "nunca a este ritmo" : e ? "se calcula al llegar" : "";
-      var tip = t !== null ? "Desde ahora hasta tenerla, haciendo la cola en orden" : e && e.tope ? "No cabe en tu almacenamiento: al llegar a esta meta se agregan los edificios que suben el tope y se calcula el tiempo" : "Se calcula al llegar a esta meta";
+      var txt = t !== null && isFinite(t) ? (e && e.aprox ? "unas " : "~") + tiempo(Math.max(1, t)) : e && e.tope ? "falta tope" : e && e.nunca ? "nunca" : e ? "al llegar" : "";
+      var tip = t !== null ? "Desde ahora hasta tenerla, haciendo la cola en orden" : e && e.nunca ? "No se llega a este ritmo (más de " + textoLimite() + ")" : e && e.tope ? "No cabe en tu almacenamiento: al llegar a esta meta se agregan los edificios que suben el tope y se calcula el tiempo" : "Se calcula al llegar a esta meta";
       return "<div style='display:flex;gap:6px;align-items:center" + (activo ? ";color:#fff" : "") + "'>" +
         "<span style='flex:1'>" + (activo ? "▶ " : "<span style='color:#9aa3b2'>" + (i + 1) + ".</span> ") + c.label +
         (txt ? " <span style='color:#9aa3b2;font-size:11.5px;cursor:help' title='" + tip + "'>" + txt + "</span>" : "") + "</span>" +
@@ -2276,9 +2306,11 @@
         "<button data-a='colaQuitar' data-i='" + i + "' style='" + est + ";padding:0 5px' title='Quitar de la cola'>✕</button></div>";
     }).join("");
     h += "<div style='margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center'>" + botonesMarcha() +
-      "<button data-a='colaVaciar' style='" + est + "'>Vaciar</button></div>";
-    if (d.colaTotal && d.colaTotal.t && d.cola.length > 1) h += "<div style='color:#9aa3b2;font-size:11.5px;margin-top:2px'>" + (d.colaTotal.completa ? "Toda la cola: ~" : "Hasta donde se puede calcular: ~") + tiempo(tiempoCola(d.colaTotal)) + " (cada meta se vuelve a calcular al llegar)</div>";
-    return det("cola", "Cola (" + d.cola.length + ") " + "<span style='font-weight:normal'>· " + estadoMarcha() + "</span>", h, true);
+      "<button data-a='colaVaciar' style='" + est + "' title='Saca todas las metas de la cola'>Vaciar</button></div>";
+    // el total va en el título (el detalle, en el tooltip)
+    var total = d.colaTotal && d.colaTotal.t && d.cola.length > 1 ? " · ~" + tiempo(tiempoCola(d.colaTotal)) : "";
+    var tipT = total ? (d.colaTotal.completa ? "Toda la cola" : "Hasta donde se puede calcular") + ": ~" + tiempo(tiempoCola(d.colaTotal)) + ". Cada meta se vuelve a calcular al llegar." : "";
+    return det("cola", "Cola (" + d.cola.length + ") <span style='font-weight:normal'>· " + estadoMarcha() + total + "</span>", h, true, "", tipT);
   }
   function linea(nombre, txt, tip) {
     return "<div style='font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help' title=\"" + attr(tip || sinHtml(txt)) + "\"><b>" + nombre + ":</b> " + txt + "</div>";
@@ -2300,8 +2332,8 @@
     if (ests.length) h += det("estado", "Estado", ests.join(""), true);
     var chk = "<div style='display:grid;grid-template-columns:1fr 1fr;gap:1px 10px'>" + FUN.map(function (f) {
       return '<label style="cursor:help" title="' + attr(f[2]) + '"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>";
-    }).join("") + "</div><div style='color:#9aa3b2;font-size:11px'>Pasa el mouse sobre cada opción para ver qué hace.</div>";
-    h += det("auto", "Automático", chk, false);
+    }).join("") + "</div>";
+    h += det("auto", "Automático", chk, false, "", "Pasa el mouse sobre cada opción para ver qué hace");
     h += det("datos", "Datos", abiertos.datos ? "<div style='font-size:11.5px'>" + infoDatos() + "</div>" : "", false); // se arma solo si está abierto (mide el festival y los precios de las casas)
     h += det("resumen", "Resumen", "<div style='font-size:11.5px'>" + infoResumen() + "</div>", false);
     h += det("bitacora", "Bitácora", "<div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 20).join("<br>") || "—") + "</div>", false);
