@@ -618,7 +618,7 @@
     Object.keys(est.ritmo || {}).forEach(function (q) { est.cuenta[q] = Math.min(est.ritmo[q] * 3600, (est.cuenta[q] || 0) + est.ritmo[q] * dt); });
     var libreS = function (r) { return (st[r] || 0) - (resRaw[r] || 0) - (col[r] || 0); };
     // beam/slab/plate con lo que se desborda (el automático usa hasta el 5 % del material por segundo)
-    if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", "kerosene"]].forEach(function (x) {
+    if (d.on.bsp) [["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", delOil()]].forEach(function (x) {
       var r = x[0], prod = x[1], rc = rec(prod); if (!(sobra[r] > 0) || !rc) return;
       var porVez = rc.porVez[r] || 0; if (!porVez) return;
       var usa = Math.min(sobra[r], (st[r] || 0) * A.FABRICAR_PCT) * dt;
@@ -1478,6 +1478,8 @@
       anotar("⚠ El catnip se acaba en ~" + tiempo(c.value / -net) + " (" + num(net) + "/s)" + (d.plan && d.ejecutando ? ": sumo farmers" : ": pon más farmers o los gatitos se mueren de hambre"));
     }
   }
+  // el oil que se desborda va a plastic (pedido el 2026-11-19); si todavía no se puede fabricar plastic, a kerosene
+  function delOil() { return rec("plastic") ? "plastic" : "kerosene"; }
   function automaticos() {
     var res = reservas(), necesitaCaza = !!(res.furs || res.ivory || res.parchment || res.manuscript || res.compedium);
     var resF = Object.assign({}, res); resF.furs = (res.furs || 0) + A.RESERVA_FURS; // furs: siempre deja una reserva
@@ -1516,8 +1518,8 @@
     if (d.on.bsp) {
       // Lo que se transforma no debe llegar al tope: si en ANTES_TOPE_SEG se llenaría, fabrica ya con el 5 % del material
       // (o con lo que entra en ese tiempo, si es más). Así nunca se desborda ni los Smelters trabajan para nada con el iron lleno.
-      // coal → steel (con iron); iron → plate; oil → kerosene (7500 oil c/u)
-      [["coal", "steel"], ["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", "kerosene"]].forEach(function (x) {
+      // coal → steel (con iron); iron → plate; oil → plastic (1000 oil c/u; kerosene si plastic no está desbloqueado)
+      [["coal", "steel"], ["wood", "beam"], ["minerals", "slab"], ["iron", "plate"], ["oil", delOil()]].forEach(function (x) {
         var r = R(x[0]), sube = (game.getResourcePerTick(x[0], true) || 0) * tps();
         if (!(r.maxValue > 0) || sube <= 0) return; // si va bajando no se pierde nada (p. ej. oil con Magnetos)
         if (r.value + sube * A.ANTES_TOPE_SEG < r.maxValue && !lleno(x[0], 0.98)) return;
@@ -1889,7 +1891,7 @@
     ["cazar", "Cazar", "Caza cuando el catpower se llena o el plan necesita furs/ivory. Deja " + A.RESERVA_CAZA + " de catpower."],
     ["manuscript", "Culture", "Con la culture al " + Math.round(A.CULTURA_PCT * 100) + " %: primero embassies (la más barata, mientras quepa en el tope); después manuscripts, solo si los furs no bajaron en los últimos 5 min."],
     ["steel", "Steel", "Cada " + A.STEEL_CADA_SEG + " s fabrica steel con el coal y el iron que el plan no necesita."],
-    ["bsp", "No llegar al tope", "Coal, wood, minerals, iron y oil nunca llegan al tope: si en " + A.ANTES_TOPE_SEG + " s se llenarían, fabrica steel, beam, slab, plate o kerosene con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (o lo que entra en ese tiempo, si es más). Así no se pierde lo que se produce ni los Smelters trabajan para nada. Nunca toca lo que reserva el plan."],
+    ["bsp", "No llegar al tope", "Coal, wood, minerals, iron y oil nunca llegan al tope: si en " + A.ANTES_TOPE_SEG + " s se llenarían, fabrica steel, beam, slab, plate o plastic (kerosene si plastic no está desbloqueado) con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (o lo que entra en ese tiempo, si es más). Así no se pierde lo que se produce ni los Smelters trabajan para nada. Nunca toca lo que reserva el plan."],
     ["fe", "Fe", "Compra la mejora de religión más barata que alcance; si no conviene esperar, Praise the sun."],
     ["unicornios", "Unicorns", "Compra lo que se paga antes: Unicorn Pasture o mejoras del Ziggurat (sacrificando solo lo necesario)."],
     ["festival", "Festivales", "Desde Drama, si un festival sube la producción al menos 5 %."],
