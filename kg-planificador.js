@@ -169,7 +169,8 @@
     for (var hechos = 0; hechos < n; hechos += porTanda) {
       var k = Math.min(porTanda, n - hechos);
       pasos.push({ type: "trade", name: "zebras", k: k, motivo: "titanium", gana: { titanium: z.ti * k },
-        reales: [{ name: "gold", val: z.gold * k }, { name: z.compra, val: z.compraVal * k }],
+        // el catpower va en lo real: se reserva (los otros tratos no lo gastan) y la barra de avance lo muestra
+        reales: [{ name: "gold", val: z.gold * k }, { name: z.compra, val: z.compraVal * k }, { name: "manpower", val: z.catpower * k }],
         // el catpower de los tratos se cuenta como furs que se dejan de cazar
         p: [{ name: "gold", val: z.gold * k }, { name: z.compra, val: z.compraVal * k }, { name: "furs", val: z.catpower * k / cz.costo * cz.furs }] });
     }
@@ -1301,7 +1302,16 @@
     d.ritmoTratos = esAuto() ? slabsParaTratos(M) : {}; // lo que se junta por segundo para los slabs de los tratos (modo edificios)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var despues = d.plan.pasos.slice(1).map(function (p) { return p.p; }).concat(!d.plan.deCola ? [] : d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
-    var a = politica(M, stock, [d.plan.pasos[0].p], d.jobActual, despues); // en un trato, p incluye los furs que cuesta su catpower
+    var p0 = d.plan.pasos[0].p;
+    if (d.plan.pasos[0].type === "trade") {
+      // en un trato, p cuenta su catpower como los furs que se dejan de cazar: con furs guardados parecía cubierto,
+      // nadie cazaba y el catpower quedaba en 10 (pasó el 2026-11-19, 7 tratos trabados). Ahora pide lo que de verdad falta.
+      var mpPide = (d.plan.pasos[0].reales.filter(function (x) { return x.name === "manpower"; })[0] || { val: 0 }).val;
+      var mpFalta = Math.max(0, Math.min(mpPide, (R("manpower").maxValue || Infinity) * 0.9) - R("manpower").value), czA = caza();
+      p0 = p0.filter(function (x) { return x.name !== "furs"; });
+      if (mpFalta > 0) p0.push({ name: "furs", val: (R("furs").value || 0) + mpFalta / czA.costo * czA.furs });
+    }
+    var a = politica(M, stock, [p0], d.jobActual, despues);
     d.etapaActual = ultimaEtapa ? Object.assign({}, ultimaEtapa) : null; // para mostrar qué se está juntando
     d.jobActual = Object.keys(a)[0];
     var asig = asignar(M, a), kittens = game.village.sim.kittens, cambios = 0;
@@ -1494,6 +1504,9 @@
     if (n < 1) return;
     var antes = R("titanium").value;
     dip.tradeMultiple(z.race, n);
+    var queda = (p.k - n) / p.k; // lo que pide el paso baja con los tratos hechos (si no, reservaba gold y catpower de más)
+    ["reales", "p"].forEach(function (k) { p[k] = p[k].map(function (x) { return { name: x.name, val: x.val * queda }; }); });
+    if (p.gana) p.gana = { titanium: p.gana.titanium * queda };
     p.k -= n; p.kHechos = (p.kHechos || 0) + n; sumar("tratos", n); sumar("titanium", R("titanium").value - antes);
     anotar("Comercié " + n + " veces con las Zebras: +" + num(R("titanium").value - antes) + " titanium");
     if (p.k <= 0) { terminarPaso(); ultimoReparto = -999; guardar(); }
