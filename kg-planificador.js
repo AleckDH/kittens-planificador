@@ -111,7 +111,7 @@
     var c = cm(type, name); if (!c || !c.controller || !c.model) return false;
     try { if (c.controller.updateEnabled) c.controller.updateEnabled(c.model); } catch (e) {}
     var r = c.controller.buyItem(c.model, { boughtByQueue: true });
-    if (r && r.itemBought) { sumar("compras", 1); game.render && game.render(); return true; }
+    if (r && r.itemBought) { sumar("compras", 1); RECETAS = {}; verBld++; game.render && game.render(); return true; }
     return false;
   }
   function etiqueta(type, name) {
@@ -211,16 +211,20 @@
     return { prom: (v[0] + v[1] + v[2] + v[3]) / 4, invierno: v[3], v: v };
   }
 
-  function medir(nFijos) {
-    var kittens = game.village.sim.kittens, orig = kittens.map(function (k) { return k.job; });
-    var jobs = game.village.jobs.filter(function (j) { return j.unlocked && j.name !== "engineer"; }).map(function (j) { return j.name; });
-    var orden = kittens.map(function (k, i) { return i; }).sort(function (a, b) {
+  // orden para elegir los farmers fijos: nunca el líder; primero los que ya son farmers y los de más experiencia
+  function ordenGatitos(kittens, orig) {
+    return kittens.map(function (k, i) { return i; }).sort(function (a, b) {
       var la = kittens[a].isLeader ? 1 : 0, lb = kittens[b].isLeader ? 1 : 0;
       if (la !== lb) return la - lb;
       var fa = orig[a] === "farmer" ? 1 : 0, fb = orig[b] === "farmer" ? 1 : 0;
       if (fa !== fb) return fb - fa;
       return ((kittens[b].skills || {}).farmer || 0) - ((kittens[a].skills || {}).farmer || 0);
     });
+  }
+  function medir(nFijos) {
+    var kittens = game.village.sim.kittens, orig = kittens.map(function (k) { return k.job; });
+    var jobs = game.village.jobs.filter(function (j) { return j.unlocked && j.name !== "engineer"; }).map(function (j) { return j.name; });
+    var orden = ordenGatitos(kittens, orig);
     var fijos = orden.slice(0, nFijos), libres = orden.slice(nFijos), N = Math.max(1, libres.length);
     var cz = caza(), base, cat, m = {}, kit = libres.map(function (i) { return { idx: i, lider: !!kittens[i].isLeader, c: {}, s: {}, orig: orig[i] || null }; });
     function pasarCaza(o) { // el catpower se convierte en furs/ivory cazando
@@ -292,15 +296,24 @@
     return { jobs: jobs, m: m, base: base, conv: conv, kit: kit, N: libres.length, fijos: fijos, nFijos: nFijos, cat: cat, caza: cz, cache: {}, mpCrudo: mpCrudo };
   }
   // sube los farmers fijos hasta que el catnip alcance (promedio del año y reserva para el invierno)
-  function medirSeguro() {
-    var nF = A.FARMERS_MIN, M, tot = game.village.sim.kittens.length;
-    for (; nF <= tot; nF++) {
-      M = medir(nF);
-      var stock = R("catnip").value, inv = M.cat.invierno;
-      // con los libres sin oficio: también comen
-      if (M.base.catnip >= 0 && (inv >= 0 || stock + inv * 200 >= 0)) break;
+  // Antes medía todo (cada gatito en cada oficio) por cada cantidad de farmers que probaba: con 12 farmers fijos
+  // eran 9 mediciones completas cada 30 s. Ahora prueba solo el catnip (rápido) y mide una vez.
+  function catnipAlcanza(nF) {
+    var kittens = game.village.sim.kittens, orig = kittens.map(function (k) { return k.job; }), orden = ordenGatitos(kittens, orig), cat;
+    try {
+      orden.forEach(function (i, n) { kittens[i].job = n < nF ? "farmer" : null; }); // los libres sin oficio: también comen
+      game.village.updateHappines(); game.village.updateResourceProduction();
+      cat = catnipEstaciones();
+    } finally {
+      kittens.forEach(function (k, i) { k.job = orig[i]; });
+      game.village.updateHappines(); game.village.updateResourceProduction();
     }
-    return M;
+    return cat.prom >= 0 && (cat.invierno >= 0 || R("catnip").value + cat.invierno * 200 >= 0);
+  }
+  function medirSeguro() {
+    var nF = A.FARMERS_MIN, tot = game.village.sim.kittens.length;
+    while (nF < tot && !catnipAlcanza(nF)) nF++;
+    return medir(nF);
   }
 
   // ---------- reparto concreto: qué gatito va a qué oficio ----------
@@ -516,16 +529,28 @@
   // Consumo por edificio que el juego recalcula según lo que hay (js/buildings.js, "action"): si el insumo se acabó,
   // el juego informa 0, pero el edificio lo consume apenas aparece. Para eso se usa el consumo completo.
   var CONSUMO_BASE = { mint: { manpower: 0.75, gold: 0.005 } };
-  function consumoPorSeg(r) {
-    var c = -Math.min(0, game.getEffect(r + "PerTickCon") || 0), extra = 0;
+  // Se calcula para todos los recursos de una pasada y se guarda medio segundo (o hasta que cambien los edificios):
+  // antes recorría todos los edificios por cada recurso, y colchones() lo pedía para todos en cada reparto simulado.
+  var verBld = 0, consCache = null; // verBld sube cada vez que se prueba un edificio de más (conEdificio)
+  function consumos() {
+    var ahora = Date.now(), t = tps();
+    if (consCache && consCache.ver === verBld && consCache.tps === t && ahora - consCache.ts < 500) return consCache;
+    var v = {};
     game.bld.buildingsData.forEach(function (b) {
-      var v = (b.effects || {})[r + "PerTick"]; if (v < 0 && b.on) c += -v * b.on;
-      var base = (CONSUMO_BASE[b.name] || {})[r];
+      if (!b.on) return;
+      var ef = b.effects || {};
+      Object.keys(ef).forEach(function (k) { if (ef[k] < 0 && /PerTick$/.test(k)) { var r = k.slice(0, -7); v[r] = (v[r] || 0) - ef[k] * b.on; } });
       // lo que le falta para el consumo completo; b.effects es por edificio (el juego lo multiplica por b.on):
       // antes se restaba una sola vez y con 5 Mints contaba 6,75 de catpower por tick en vez de 3,75 (casi el doble de hunters)
-      if (base && b.on) extra += Math.max(0, (base + Math.min(0, (b.effects || {})[r + "PerTickCon"] || 0)) * b.on);
+      var base = CONSUMO_BASE[b.name];
+      if (base) Object.keys(base).forEach(function (r) { v[r] = (v[r] || 0) + Math.max(0, (base[r] + Math.min(0, ef[r + "PerTickCon"] || 0)) * b.on); });
     });
-    return (c + extra) * tps();
+    return (consCache = { ver: verBld, tps: t, ts: ahora, v: v, con: {} });
+  }
+  function consumoPorSeg(r) {
+    var m = consumos();
+    if (!(r in m.con)) m.con[r] = -Math.min(0, game.getEffect(r + "PerTickCon") || 0);
+    return (m.con[r] + (m.v[r] || 0)) * m.tps;
   }
   // reserva de insumos que nadie gasta, para que esos edificios no se queden sin nada y se apaguen
   // la reserva nunca impide una compra que llena justo el tope
@@ -816,7 +841,7 @@
   function textoAhorro(x) { return isFinite(x) ? "ahorra " + tiempo(x) : "sin esto no se llega"; }
 
   // =================== ALMACENAMIENTO Y EDIFICIOS ===================
-  function refrescar(meta) { game.updateCaches(); if (meta && meta.calculateEffects) meta.calculateEffects(meta, game); game.updateCaches(); }
+  function refrescar(meta) { verBld++; game.updateCaches(); if (meta && meta.calculateEffects) meta.calculateEffects(meta, game); game.updateCaches(); }
   function ajustar(name, dd) {
     var meta = game.bld.get(name), ext = game.bld.getBuildingExt(name);
     ext.set("val", meta.val + dd); if (typeof meta.on === "number") ext.set("on", meta.on + dd);
@@ -828,7 +853,7 @@
       .forEach(function (o) { if (o && typeof o === "object") copias.push([o, Object.assign({}, o)]); });
     return function () {
       copias.forEach(function (c) { Object.keys(c[0]).forEach(function (k) { if (!(k in c[1])) delete c[0][k]; }); Object.assign(c[0], c[1]); });
-      game.updateCaches();
+      verBld++; game.updateCaches();
     };
   }
   // corre fn() como si tuvieras un edificio más, y deja todo como estaba
@@ -1237,8 +1262,9 @@
   }
   // lo fabricado (no materias primas) que piden las metas siguientes de la cola
   function fabricadosCola() {
-    var o = {}; if (!d.plan || !d.plan.deCola || d.cola.length < 2) return o;
-    preciosCola(1).forEach(function (p) { p.forEach(function (x) { if (esFab(x.name)) o[x.name] = (o[x.name] || 0) + x.val; }); });
+    // con la meta ya comprada (quedan sus ayudas "después"), la cola ya la sacó: la siguiente es la primera
+    var o = {}, desde = d.plan && d.plan.metaHecha ? 0 : 1; if (!d.plan || !d.plan.deCola || d.cola.length <= desde) return o;
+    preciosCola(desde).forEach(function (p) { p.forEach(function (x) { if (esFab(x.name)) o[x.name] = (o[x.name] || 0) + x.val; }); });
     return o;
   }
   // Cola: mientras se trabaja en la meta actual, fabrica lo que piden las siguientes con lo que está por llenarse
@@ -1826,10 +1852,10 @@
   function oroATitanio(res) {
     var g = R("gold"), ti = R("titanium");
     var estado = function (txt) { d.oroEstado = txt; };
+    var pct = g.maxValue ? g.value / g.maxValue : 0; // primero el gold: casi siempre corta acá, sin calcular los tratos cada segundo
+    if (!g.maxValue || pct < A.ORO_RENTABLE_PCT) return estado("esperando que el gold pase el " + Math.round(A.ORO_RENTABLE_PCT * 100) + " % (" + num(g.value) + " / " + num(g.maxValue) + ")");
     var opciones = tratosRazas();
     if (!opciones.length) return estado("todavía no puedes comerciar");
-    var pct = g.maxValue ? g.value / g.maxValue : 0;
-    if (!g.maxValue || pct < A.ORO_RENTABLE_PCT) return estado("esperando que el gold pase el " + Math.round(A.ORO_RENTABLE_PCT * 100) + " % (" + num(g.value) + " / " + num(g.maxValue) + ")");
     // con quién: la raza cuyo trato cubre más de lo que falta, sin pagar con algo que también falta
     var falta = faltaPlanAhora(), resT = Object.assign({}, res), cb = colchonesBase(), mejor = null;
     Object.keys(cb).forEach(function (q) { resT[q] = Math.max(resT[q] || 0, cb[q]); }); // nunca paga con los insumos de los Smelters
@@ -2174,16 +2200,23 @@
       return '<label style="cursor:help" title="' + attr(f[2]) + '"><input type="checkbox" data-k="' + f[0] + '"' + (d.on[f[0]] ? " checked" : "") + "> " + f[1] + "</label>";
     }).join("") + "</div><div style='color:#9aa3b2;font-size:11px'>Pasa el mouse sobre cada opción para ver qué hace.</div>";
     h += det("auto", "Automático", chk, false);
-    h += det("datos", "Datos", "<div style='font-size:11.5px'>" + infoDatos() + "</div>", false);
+    h += det("datos", "Datos", abiertos.datos ? "<div style='font-size:11.5px'>" + infoDatos() + "</div>" : "", false); // se arma solo si está abierto (mide el festival y los precios de las casas)
     h += det("resumen", "Resumen", "<div style='font-size:11.5px'>" + infoResumen() + "</div>", false);
     h += det("bitacora", "Bitácora", "<div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 20).join("<br>") || "—") + "</div>", false);
+    if (h === ultimoHtml) return; // nada cambió: no se redibuja (el tooltip abierto no parpadea)
+    ultimoHtml = h;
     var sel = document.getElementById("kgP_meta"), valor = sel ? sel.value : null;
     caja.innerHTML = h;
     if (valor) { var s2 = document.getElementById("kgP_meta"); if (s2) s2.value = valor; }
   }
   caja.addEventListener("change", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-k"); if (k) { d.on[k] = e.target.checked; guardar(); } });
   // el panel se redibuja cada 2 s: recordar qué secciones dejó abiertas ("toggle" no sube, por eso se escucha en captura)
-  caja.addEventListener("toggle", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-det"); if (k) abiertos[k] = e.target.open; }, true);
+  caja.addEventListener("toggle", function (e) {
+    var k = e.target.getAttribute && e.target.getAttribute("data-det"); if (!k) return;
+    var antes = abiertos[k]; abiertos[k] = e.target.open;
+    if (k === "datos" && e.target.open && !antes) setTimeout(pintar, 0); // Datos se arma recién al abrirlo
+  }, true);
+  var ultimoHtml = "";
   async function calcularYMostrar(type, name, opts) {
     calculando = true; vista = pintarPlan(); pintar();
     try { d.plan = await calcularPlan(type, name, opts); d.plan.calculadoEn = Date.now(); anotar("Plan calculado para " + d.plan.label); }
@@ -2260,7 +2293,7 @@
     if (d.plan) d.plan.inicio = null; // al volver a empezar, el cronómetro arranca de cero
     if (habia) anotar("Detenido" + (d.cola.length ? " (la cola queda guardada)" : ""));
   }
-  var colaIniciando = false;
+  var colaIniciando = false, colaError = -1e9;
   // al cumplir una meta de la cola, sigue con la siguiente
   async function siguienteDeCola() {
     if (colaIniciando) return; colaIniciando = true;
@@ -2407,8 +2440,10 @@
       ultimaReestimacion = segundos; d.reestimar = false;
       try { reestimar(); } catch (e) { console.error("[Planificador reestimar]", e); }
     }
-    if (d.colaActiva && d.cola.length && !d.ejecutando && !d.pausa && !colaIniciando) {
-      siguienteDeCola().catch(function (e) { console.error(e); anotar("Cola: error " + e.message); });
+    if (segundos % 60 === 30) RECETAS = {}; // el bono de fabricación sube con las mejoras y aparecen recetas nuevas (plastic, concrete…)
+    if (d.colaActiva && d.cola.length && !d.ejecutando && !d.pausa && !colaIniciando && segundos - colaError >= 60) {
+      // si el cálculo falla, espera 1 min antes de reintentar (antes recalculaba cada segundo y trababa el juego)
+      siguienteDeCola().catch(function (e) { colaError = segundos; console.error(e); anotar("Cola: error " + e.message + " (reintento en 1 min)"); });
     }
     else if (!d.plan && d.modoEdificios && d.on.edificios && !d.colaActiva && !d.pausa && segundos - ultimaBusqueda >= 30) {
       ultimaBusqueda = segundos;
