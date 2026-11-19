@@ -1204,7 +1204,9 @@
   function reservas(sinCola) { // lo que el plan necesita (y los insumos de los edificios que consumen): nadie más debe gastarlo
     var o = colchones();
     if (!d.plan || !d.ejecutando) return o;
-    var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = 0; });
+    // lo ya fabricado cuenta (si el steel está hecho, no se reserva coal ni iron para hacerlo de nuevo);
+    // las materias primas, en cero: así se reserva todo lo que el plan va a gastar de ellas
+    var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = esFab(r.name) ? r.value : 0; });
     function reales(p) { return p.type === "trade" ? p.reales : p.p; }
     d.plan.pasos.forEach(function (p) { reales(p).forEach(function (x) { o[x.name] = (o[x.name] || 0) + x.val; }); });
     var bruto = faltante(stock, d.plan.pasos.map(reales));
@@ -1241,10 +1243,33 @@
     if (hecho.length) anotar("Cola: fabriqué " + hecho.join(", ") + " para las metas siguientes");
   }
   function libre(n, res) { return R(n).value - ((res || {})[n] || 0); }
+  // cuánto de un fabricado (p. ej. steel) le falta todavía al plan y a la cola, contando lo que ya hay
+  function pidePlan(n) {
+    if (!d.plan || !d.ejecutando) return 0;
+    var listas = d.plan.pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; });
+    if (d.plan.deCola) listas = listas.concat(d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
+    var pool = {}, dem = 0;
+    function pedir(x, cant, nivel) {
+      if (cant <= 1e-9 || nivel > 8) return;
+      var hay = x in pool ? pool[x] : R(x).value, usa = Math.min(hay, cant); pool[x] = hay - usa; cant -= usa;
+      if (cant <= 1e-9) return;
+      if (x === n) { dem += cant; return; }
+      if (esFab(x)) { var r = rec(x), veces = Math.ceil(cant / r.rinde - 1e-6); Object.keys(r.porVez).forEach(function (q) { pedir(q, r.porVez[q] * veces, nivel + 1); }); }
+    }
+    listas.forEach(function (p) { (p || []).forEach(function (x) { pedir(x.name, x.val, 0); }); });
+    return dem;
+  }
   function fabricar(nombre, max, res) {
     var c = game.workshop.getCraft(nombre); if (!c || !c.unlocked) return 0;
-    var n = max;
-    game.workshop.getCraftPrice(c).forEach(function (p) { n = Math.min(n, Math.floor(libre(p.name, res) / p.val)); });
+    var n = max, precio = game.workshop.getCraftPrice(c), rc = rec(nombre);
+    // lo que el plan reserva para hacer este mismo fabricado (coal e iron para su steel) sí se puede usar para hacerlo:
+    // fabricarlo antes no le quita nada al plan (antes el coal se llenaba sin hacer steel)
+    var paraPlan = rc ? Math.ceil(pidePlan(nombre) / rc.rinde - 1e-6) : 0;
+    if (paraPlan > 0 && res) {
+      var col = colchones(); res = Object.assign({}, res);
+      precio.forEach(function (p) { res[p.name] = Math.max(col[p.name] || 0, (res[p.name] || 0) - p.val * paraPlan); });
+    }
+    precio.forEach(function (p) { n = Math.min(n, Math.floor(libre(p.name, res) / p.val)); });
     if (!isFinite(n) || n < 1) return 0;
     return craftear(nombre, n);
   }
