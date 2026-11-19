@@ -724,8 +724,9 @@
       Object.keys(pv).forEach(function (q) { mm = Math.min(mm, Math.floor(Math.max(0, (st[q] || 0) - (reserva[q] || 0)) / pv[q] + 1e-9)); });
       if (mm > 0) { Object.keys(pv).forEach(function (q) { st[q] -= pv[q] * mm; }); st[n] = (st[n] || 0) + mm * rc.rinde; }
     };
-    var guardia = 0;
+    var guardia = 0, vuelta = null; // vuelta: un efecto que dura un tiempo (festival): cuándo termina y la medición sin él
     while (k < items.length && t < limite && guardia++ < 200000) {
+      if (vuelta && t >= vuelta.t - 1e-6) { M = vuelta.M; vuelta = null; alloc = null; } // terminó el festival
       if (kRes !== k) { // lo que el resto del plan necesita: los automáticos de la simulación no lo tocan
         kRes = k; resRaw = faltante({}, items.slice(k).map(function (x) { return x.p; }));
         est.z = zebras((st.ship || 0) - est.barcos0);
@@ -753,7 +754,11 @@
         var it = items[k]; mp = Math.max(0, mp - mpPide(it));
         if (it.cap) Object.keys(it.cap).forEach(function (r) { cap[r] = (cap[r] || 0) + it.cap[r]; });
         if (it.gana) Object.keys(it.gana).forEach(function (r) { st[r] = Math.min(isFinite(cap[r]) ? cap[r] : Infinity, (st[r] || 0) + it.gana[r]); });
-        if (it.M) M = it.M;
+        if (it.M) {
+          if (it.dur) vuelta = { t: t + it.dur, M: M }; // festival: produce más durante it.dur y después vuelve
+          else if (vuelta) vuelta.M = it.M; // un edificio nuevo durante el festival: su medición es sin festival (se pierde el resto del bono: estimación prudente)
+          M = it.M;
+        }
         it.t = t; k++; alloc = null; compro = true;
       }
       if (compro || k >= items.length) continue; // con la compra hecha, nuevo reparto antes de avanzar
@@ -765,6 +770,7 @@
       var mpR = mpRitmo(), mpN = mpPide(items[k]);
       if (mpN > mp && mpR > 1e-9) tAlc = Math.max(tAlc, (mpN - mp) / mpR); else if (mpN > mp) tAlc = Infinity;
       if (tAlc > 0) dt = Math.min(dt, tAlc);
+      if (vuelta) dt = Math.min(dt, vuelta.t - t);
       Object.keys(net).forEach(function (r) {
         var v = net[r], s = st[r] || 0;
         if (v > 1e-9 && isFinite(cap[r]) && s < cap[r]) dt = Math.min(dt, (cap[r] - s) / v);
@@ -1203,8 +1209,13 @@
     var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
     // simulación final con todo (hasta la meta: su tiempo es el que se muestra)
     var itemsF = items.slice(0, nSost).concat(ayA.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
-    var fin = (ayA.length || barcos || nSost) ? simular(M, itemsF) : base;
-    itemsF = itemsF.concat(ayD.map(function (a) { return { p: a.p, M: a.M }; }));
+    // festival: ¿la cola entera (esta meta, sus ayudas "después" y las siguientes) termina antes con uno ahora?
+    await esperar();
+    var itemsD = ayD.map(function (a) { return { p: a.p, M: a.M }; });
+    var fest = evaluarFestival(M, itemsF.concat(itemsD).concat(sig));
+    if (fest && fest.conviene) { itemsF = [Object.assign({}, fest.item)].concat(itemsF); pasos.unshift(pasoFestival(fest)); }
+    var fin = (ayA.length || barcos || nSost || (fest && fest.conviene)) ? simular(M, itemsF) : base;
+    itemsF = itemsF.concat(itemsD);
     // tiempos de las metas siguientes, haciendo la cola en orden (desde ahora)
     var tCola = {};
     if (sig.length) {
@@ -1215,7 +1226,7 @@
     }
     // tiempos por recurso (con todos los libres en su mejor oficio)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
-    var falta = faltante(stock, pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; })), porRec = [];
+    var falta = faltante(stock, pasos.map(function (p) { return p.reales || p.p; })), porRec = [];
     delete falta.titanium; // va por comercio
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r), b = M.base[r] || 0, conJ = j ? b + M.m[j][r] * M.N : b, conv = null;
@@ -1238,6 +1249,7 @@
     var z = zebras();
     return {
       type: type, name: name, label: etiqueta(type, name), pasos: pasos, M: M, sim: fin, sinAyuda: tAhoraSinNada, avisos: avisos,
+      festival: fest, festItem: fest && fest.conviene ? fest.item : null, sigItems: sig, revisadoFest: Date.now(),
       porRec: porRec, imposible: alm.imposible, ms: Math.round(performance.now() - t0),
       tratos: tratos.reduce(function (a, s) { return a + s.k; }, 0), faltaTi: faltaTi, zebras: z,
       sinZebras: faltaTi > 0 && !tratos.length, tCola: tCola, nSig: sig.filter(function (x) { return x.meta !== undefined; }).length
@@ -1251,7 +1263,7 @@
     // lo ya fabricado cuenta (si el steel está hecho, no se reserva coal ni iron para hacerlo de nuevo);
     // las materias primas, en cero: así se reserva todo lo que el plan va a gastar de ellas
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = esFab(r.name) ? r.value : 0; });
-    function reales(p) { return p.type === "trade" ? p.reales : p.p; }
+    function reales(p) { return p.reales || p.p; }
     d.plan.pasos.forEach(function (p) { reales(p).forEach(function (x) { o[x.name] = (o[x.name] || 0) + x.val; }); });
     var bruto = faltante(stock, d.plan.pasos.map(reales));
     Object.keys(bruto).forEach(function (r) { o[r] = Math.max(o[r] || 0, bruto[r]); });
@@ -1294,7 +1306,7 @@
   // reservadas para la Mansion en curso y nunca la compraba (2026-11-19).
   function pidePlan(n) {
     if (!d.plan || !d.ejecutando) return 0;
-    var listas = d.plan.pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; });
+    var listas = d.plan.pasos.map(function (p) { return p.reales || p.p; });
     var pool = {}, dem = 0;
     function pedir(x, cant, nivel) {
       if (cant <= 1e-9 || nivel > 8) return;
@@ -1349,7 +1361,7 @@
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var despues = d.plan.pasos.slice(1).map(function (p) { return p.p; }).concat(!d.plan.deCola ? [] : d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
     var p0 = d.plan.pasos[0].p;
-    if (d.plan.pasos[0].type === "trade") {
+    if (d.plan.pasos[0].reales && d.plan.pasos[0].reales.some(function (x) { return x.name === "manpower"; })) { // tratos y festival
       // en un trato, p cuenta su catpower como los furs que se dejan de cazar: con furs guardados parecía cubierto,
       // nadie cazaba y el catpower quedaba en 10 (pasó el 2026-11-19, 7 tratos trabados). Ahora pide lo que de verdad falta.
       var mpPide = (d.plan.pasos[0].reales.filter(function (x) { return x.name === "manpower"; })[0] || { val: 0 }).val;
@@ -1387,6 +1399,13 @@
       d.ejecutando = false; d.plan = null; guardar(); return;
     }
     if (p.type === "trade") { comerciar(p); }
+    else if (p.type === "festival") {
+      if (!festivalDisponible()) { anotar("Festival: ya hay uno en curso"); terminarPaso(); ultimoReparto = -999; }
+      else {
+        var colF = colchones(), resFe = Object.assign({}, colF); resFe.furs = (colF.furs || 0) + A.RESERVA_FURS; // el parchment sale de los furs, dejando la reserva
+        if (festival(resFe)) { terminarPaso(); ultimoReparto = -999; d.reestimar = true; guardar(); }
+      }
+    }
     else if (p.type === "ship") { // fabricar barcos por tandas, a medida que alcanza
       fabricarHacia(p.p);
       var cs = game.workshop.getCraft("ship"), n = p.veces;
@@ -1424,6 +1443,7 @@
   // ---------- pasos: hechos, actual y su avance ----------
   function textoPaso(p) {
     if (p.type === "trade") return "Comerciar " + (p.k > 0 ? p.k : (p.kHechos || 0)) + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
+    if (p.type === "festival") return "Festival <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + " en la cola; dura 1 año)</span>";
     if (p.type === "ship") {
       var rinde = (rec("ship") || { rinde: 1 }).rinde, zb = zebras(p.veces * rinde);
       return "Fabricar ~" + Math.round(p.veces * rinde) + " barcos <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro || 0) + ")</span>" +
@@ -1443,7 +1463,7 @@
   // ---------- atascos (pedido el 2026-11-19): si el paso no avanza en ATASCO_SEG, avisa lo que falta según el juego y recalcula ----------
   // lo que falta según el juego: lo que pide el paso, lo que tienes y lo que entra por segundo (como la pestaña del edificio)
   function faltaJuego(p) {
-    var pr = p.type === "trade" ? p.reales : p.p, partes = [];
+    var pr = p.reales || p.p, partes = [];
     (pr || []).forEach(function (x) {
       var r = R(x.name); if (!r || r.value >= x.val - 1e-6) return;
       var por = (game.getResourcePerTick(x.name, true) || 0) * tps(), falta = x.val - r.value;
@@ -1477,7 +1497,7 @@
     }
   }
   function avancePaso(p) {
-    var pr = p.type === "trade" ? p.reales : p.p; if (!pr || !pr.length) return [];
+    var pr = p.reales || p.p; if (!pr || !pr.length) return [];
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var tot = faltante({}, [pr]), fal = faltante(sinCol(stock, colchones()), [pr]);
     return Object.keys(tot).map(function (r) { return { r: r, pct: Math.max(0, Math.min(1, 1 - (fal[r] || 0) / tot[r])), falta: fal[r] || 0 }; })
@@ -1573,9 +1593,22 @@
     var iMeta = -1; P.pasos.forEach(function (p, i) { if (iMeta < 0 && p.motivo === "meta") iMeta = i; });
     var items = (iMeta >= 0 ? P.pasos.slice(0, iMeta + 1) : P.pasos).map(function (p) { // el tiempo es hasta la meta (las ayudas para la cola van después)
       if (p.type === "trade") return itemTrato(p);
+      if (p.type === "festival") return P.festItem ? Object.assign({}, P.festItem) : { p: p.p };
       return { p: p.p, cap: p.cap, gana: p.gana, M: p.M };
     });
-    P.sim = simular(medirSeguro(), items);
+    var M = medirSeguro();
+    // festival: cuando termina el del año (o al principio no convenía), cada 5 min vuelve a ver si uno ahora acorta la cola
+    if (d.on.festival && !P.metaHecha && iMeta >= 0 && Date.now() - (P.revisadoFest || 0) >= 600000 && festivalDisponible() && !P.pasos.some(function (p) { return p.type === "festival"; })) {
+      var resto = P.pasos.slice(iMeta + 1).map(function (p) { return { p: p.p, M: p.M }; }); // ayudas "después"
+      var ev = evaluarFestival(M, items.concat(resto).concat(P.sigItems || []));
+      P.festival = ev; P.revisadoFest = Date.now();
+      if (ev && ev.conviene) {
+        P.pasos.unshift(pasoFestival(ev)); P.festItem = ev.item; items.unshift(Object.assign({}, ev.item));
+        d.jobActual = null; ultimoReparto = -999;
+        anotar("Festival: uno ahora " + textoAhorro(ev.ahorro) + " en la cola; lo agrego al plan");
+      }
+    }
+    P.sim = simular(M, items);
     P.reestimadoEn = Date.now(); marcarSim(P);
   }
 
@@ -1635,7 +1668,8 @@
     if (d.on.oroTitanio && !pasoTrato) oroATitanio(res); // antes de cazar, para que quede catpower
     if (d.on.cazar && (lleno("manpower", 0.99) || (necesitaCaza && d.ejecutando))) {
       var reservaCaza = A.RESERVA_CAZA + (pasoTrato ? (zebras() || { catpower: 50 }).catpower * Math.min(d.plan.pasos[0].k, 50) : 0);
-      if (fest) reservaCaza = Math.max(reservaCaza, FESTIVAL.manpower); // guarda el catpower del festival
+      var pasoFest = d.ejecutando && d.plan && d.plan.pasos[0] && d.plan.pasos[0].type === "festival";
+      if (fest || pasoFest) reservaCaza = Math.max(reservaCaza, FESTIVAL.manpower); // guarda el catpower del festival
       var zt = d.on.oroTitanio ? zebras() : null, gt = R("gold");
       if (zt && gt.maxValue && gt.value >= gt.maxValue * 0.9) reservaCaza = Math.max(reservaCaza, A.RESERVA_CAZA + 20 * zt.catpower + ((res || {}).manpower || 0)); // catpower para los tratos gold → titanium
       var cz = caza(), grupos = Math.floor((R("manpower").value - reservaCaza) / cz.costo);
@@ -1744,6 +1778,7 @@
   // devuelve null si no toca festival; si toca, {listo: hay todo lo necesario}
   function festivalQuiere(res) {
     if (!festivalDisponible()) return null;
+    if (d.plan && d.ejecutando) return null; // con un plan en marcha decide el plan (paso "Festival" si acorta la cola)
     var c = R("culture"); if (c.maxValue && c.maxValue - (res.culture || 0) < FESTIVAL.culture) return null; // no cabe con lo que reserva el plan
     var ef = efectoFestival(); if (!Object.keys(ef).some(function (r) { return ef[r] >= 0.05; })) return null; // sube menos del 5 %: no vale la pena
     var resF = Object.assign({}, res); resF.furs = (res.furs || 0) + A.RESERVA_FURS;
@@ -1752,15 +1787,39 @@
     var listo = libre("manpower", res) >= FESTIVAL.manpower && libre("culture", res) >= FESTIVAL.culture;
     return { listo: listo };
   }
+  // ¿Un festival ahora termina antes la cola? (pedido el 2026-11-19) Simula la cola entera dos veces: tal cual, y con el
+  // festival primero: hay que juntar 1500 catpower, 5000 culture y 2500 parchment (los gatitos van a eso y la meta espera),
+  // y después todo produce como con festival durante un año (400 días) y vuelve. Conviene si la cola termina antes.
+  function medirConFestival(nF) {
+    var cal = game.calendar, d0 = cal.festivalDays;
+    try { cal.festivalDays = Math.max(d0, 400); return medir(nF); }
+    finally { cal.festivalDays = d0; game.village.updateHappines(); game.village.updateResourceProduction(); }
+  }
+  function evaluarFestival(M, items) {
+    if (!d.on.festival || !items.length || !festivalDisponible()) return null;
+    if (!(R("culture").maxValue >= FESTIVAL.culture) || !(R("manpower").maxValue >= FESTIVAL.manpower) || !rec("parchment")) return null; // no cabe
+    var Mf; try { Mf = medirConFestival(M.nFijos); } catch (e) { console.error(e); return null; }
+    var dur = 400 * (game.calendar.ticksPerDay || 10) / tps(); // un año, en segundos reales
+    var item = { p: [{ name: "culture", val: FESTIVAL.culture }, { name: "parchment", val: FESTIVAL.parchment }], mp: FESTIVAL.manpower, M: Mf, dur: dur, festival: true };
+    var copia = function (l) { return l.map(function (x) { return Object.assign({}, x); }); };
+    var sin = tcomp(simular(M, copia(items))), con = tcomp(simular(M, [Object.assign({}, item)].concat(copia(items))));
+    var ahorro = sin - con;
+    return { conviene: isFinite(con) && (!isFinite(sin) || ahorro >= Math.max(60, sin * 0.01)), ahorro: ahorro, sin: sin, con: con, item: item, dur: dur };
+  }
+  function pasoFestival(ev) {
+    var pr = [{ name: "culture", val: FESTIVAL.culture }, { name: "parchment", val: FESTIVAL.parchment }];
+    return { type: "festival", name: "festival", motivo: "festival", ahorro: ev.ahorro, p: pr, reales: pr.concat([{ name: "manpower", val: FESTIVAL.manpower }]) };
+  }
   function festival(resF) {
-    if (!parchmentHasta(FESTIVAL.parchment + (resF.parchment || 0), resF)) return;
+    if (!parchmentHasta(FESTIVAL.parchment + (resF.parchment || 0), resF)) return false;
     var pr = Object.keys(FESTIVAL).map(function (k) { return { name: k, val: FESTIVAL[k] }; });
-    if (!pr.every(function (x) { return R(x.name).value >= x.val; })) return;
+    if (!pr.every(function (x) { return R(x.name).value >= x.val; })) return false;
     game.resPool.payPrices(pr);
     game.village.holdFestival(1);
     sumar("festivales", 1);
     var ef = efectoFestival(), top = Object.keys(ef).sort(function (a, b) { return ef[b] - ef[a]; }).slice(0, 3);
     anotar("Festival: " + top.map(function (r) { return titulo(r) + " +" + Math.round(ef[r] * 100) + " %"; }).join(", ") + " por " + game.calendar.festivalDays + " días");
+    return true;
   }
 
   // ---------- comercio con todas las razas: cuánto da en promedio un trato (fórmula de js/diplomacy.js, tradeImpl) ----------
@@ -1826,7 +1885,7 @@
   function faltaPlanAhora() {
     if (!d.plan || !d.ejecutando || !d.plan.pasos.length) return {};
     var st = {}; game.resPool.resources.forEach(function (r) { st[r.name] = r.value; });
-    var lista = d.plan.pasos.map(function (p) { return p.type === "trade" ? p.reales : p.p; });
+    var lista = d.plan.pasos.map(function (p) { return p.reales || p.p; });
     var o = faltante(sinCol(st, colchonesBase()), lista);
     lista.forEach(function (pr) { pr.forEach(function (x) { var f = x.val - (st[x.name] || 0); if (f > 0) o[x.name] = Math.max(o[x.name] || 0, f); }); }); // también lo fabricado (beam, slab, steel…)
     return o;
@@ -2031,7 +2090,7 @@
     ["bsp", "No llegar al tope", "Coal, wood, minerals, iron y oil nunca llegan al tope: si en " + A.ANTES_TOPE_SEG + " s se llenarían, fabrica steel, beam, slab, plate o plastic (kerosene si plastic no está desbloqueado) con el " + Math.round(A.FABRICAR_PCT * 100) + " % del material (o lo que entra en ese tiempo, si es más). Así no se pierde lo que se produce ni los Smelters trabajan para nada. Nunca toca lo que reserva el plan."],
     ["fe", "Fe", "Compra la mejora de religión más barata que alcance; si no conviene esperar, Praise the sun."],
     ["unicornios", "Unicorns", "Compra lo que se paga antes: Unicorn Pasture o mejoras del Ziggurat (sacrificando solo lo necesario)."],
-    ["festival", "Festivales", "Desde Drama, si un festival sube la producción al menos 5 %."],
+    ["festival", "Festivales", "Desde Drama. Con un plan en marcha: simula la cola entera con y sin un festival ahora (contando lo que tardan los gatitos en juntar 1500 catpower, 5000 culture y 2500 parchment, y la producción extra durante el año que dura). Si la cola termina antes, agrega el paso \"Festival\" al principio; si no, vuelve a revisar cada 10 min. Sin plan: si sube la producción al menos 5 %."],
     ["oportunidad", "Oportunidad", "Mejoras del workshop con lo que sobra: recursos casi llenos o precio chico. Nunca toca lo que reserva el plan."],
     ["oroTitanio", "Gold → tratos", "Con el gold sobre el " + Math.round(A.ORO_RENTABLE_PCT * 100) + " %: comercia por lo que le falta al plan o por el trato más rentable. Al " + Math.round(A.ORO_TRATOS_PCT * 100) + " %, titanium con las Zebras. Siempre deja el " + Math.round(A.ORO_DEJAR_PCT * 100) + " %."],
     ["lider", "Ascender al líder", "Sube de rango al líder cuando hay gold libre (25 × rango siguiente) y le alcanza la experiencia."],
@@ -2130,6 +2189,8 @@
     });
     por += "<div style='color:#9aa3b2;font-size:11.5px;margin-top:4px'>Gatitos: " + P.M.N + " libres + " + P.M.nFijos + " farmers" +
       (Object.keys(mtP).length ? " · siempre " + textoMant(mtP) + " para mantener " + nombresConv(P.M) : "") + ". Los libres juntan un recurso a la vez.</div>";
+    if (P.festival) por += "<div style='color:#9aa3b2;font-size:11.5px'>Festival: " + (P.festival.conviene ? "uno ahora " + textoAhorro(P.festival.ahorro) + " en la cola (va primero en los pasos)" :
+      "no conviene ahora: la cola " + (isFinite(P.festival.ahorro) && P.festival.ahorro < 0 ? "tardaría " + tiempo(-P.festival.ahorro) + " más (juntar 1500 catpower, 5000 culture y 2500 parchment cuesta más de lo que adelanta)" : "terminaría casi igual") + ". Se vuelve a revisar cada 10 min.") + "</div>";
     if (P.tratos && P.zebras) por += "<div style='color:#9aa3b2;font-size:11.5px'>Zebras: éxito " + Math.round(P.zebras.exito * 100) + " %, titanium en el " + Math.round(P.zebras.prob * 100) + " % de los tratos → ~" + num(P.zebras.ti) + " por trato.</div>";
     por += "<div style='color:#9aa3b2;font-size:11.5px'>Caza: " + Math.round(P.M.caza.furs) + " furs y " + Math.round(P.M.caza.ivory) + " ivory por caza. Catnip: " + num(P.M.cat.prom) + "/s de promedio, " + num(P.M.cat.invierno) + "/s en invierno. Calculado en " + P.ms + " ms.</div>";
     h += det("porque", "Qué te frena", por, false);
@@ -2463,7 +2524,7 @@
     rankingEdificios: rankingEdificios, siguienteEdificio: siguienteEdificio,
     colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores,
     tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora,
-    planAyudas: planAyudas, faltante: faltante, prodActual: prodActual, itemsSiguientes: itemsSiguientes, prefabricarCola: prefabricarCola, preciosCola: preciosCola, calcularCola: calcularCola } };
+    planAyudas: planAyudas, faltante: faltante, prodActual: prodActual, itemsSiguientes: itemsSiguientes, prefabricarCola: prefabricarCola, preciosCola: preciosCola, calcularCola: calcularCola, evaluarFestival: evaluarFestival } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     var rm = retomar.meta, calc;
