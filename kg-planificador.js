@@ -29,8 +29,8 @@
     PREFAB_DEJAR_PCT: 0.75, // …sin bajarlo de este % (no le quita nada a la meta actual)
     LIMPIA_MIN_PCT: 0.01,  // medioambiente: el modo edificios prefiere un edificio que baje al menos este % de la pollution que entra
     EDIFICIOS_HORAS: 6,    // modo edificios: solo considera los que se alcanzan en este tiempo
-    EDIFICIOS_EXCLUIR: ["unicornPasture"], // la Unicorn Pasture la decide "Invertir unicorns"
-    EDIFICIOS_SIN: ["titanium"] // el modo edificios no compra edificios que piden esto (directo o fabricado: alloy…); queda para las mejoras
+    EDIFICIOS_EXCLUIR: ["unicornPasture"] // la Unicorn Pasture la decide "Invertir unicorns"
+    // (2026-11-19: se sacó la regla de no comprar edificios con titanium: si llega antes a la meta, se gasta)
   };
   // ======================================================
   function tps() { return game.getTicksPerSecondUI ? game.getTicksPerSecondUI() : (game.ticksPerSecond || 5); } // velocidad real (con aceleración)
@@ -862,7 +862,6 @@
           var ya = pasos.concat(lista).filter(function (x) { return x.name === c.name; }).length;
           var p = game.bld.getPrices(c.name, ya);
           if (!p.every(function (x) { var rr = R(x.name); return !rr.maxValue || x.val <= rr.maxValue + (extraC[x.name] || 0); })) continue; // no cabe
-          if (usaEscasos(p) && !usaEscasos(pMeta)) continue; // el titanium queda para las mejoras
           var paso = { type: "buildings", name: c.name, p: p, cap: c.dmax, motivo: "almacenamiento" };
           var t = tcomp(simular(M, itemsDe(pasos.concat(lista, [paso]))));
           // si hoy no se llega nunca (falta algo que las ayudas pueden destrabar), igual se elige: el que más tope da
@@ -896,7 +895,6 @@
     var elegidos = [], M0 = M;
     // medioambiente: los que suben la pollution no son ayuda (se mide antes, sin los edificios de prueba puestos)
     var sucios = {}; game.bld.buildingsData.forEach(function (b) { if (b.unlocked && contamina(b.name)) sucios[b.name] = true; });
-    var metaPideEscaso = A.EDIFICIOS_SIN.some(function (r) { return necesarios[r] > 0; }); // la meta misma pide titanium
     var nombres = function () { return elegidos.map(function (e) { return e.name; }); };
     // arma la lista a simular: las ayudas "antes" van primero; las "después" (solo cola), justo tras la meta actual
     var armar = function (nuevo, despues) {
@@ -915,7 +913,6 @@
           if (!b.unlocked || sucios[b.name] || consumeSinSostener(b, M0, true)) return; // p. ej. un Magneto más con el oil bajando (en cualquier modo)
           var p = game.bld.getPrices(b.name, elegidos.filter(function (e) { return e.name === b.name; }).length);
           if (game.resPool.isStorageLimited(p)) return; // no cabe en tu almacenamiento (función del juego)
-          if (!metaPideEscaso && usaEscasos(p)) return; // el titanium queda para las mejoras (p. ej. Calciner), salvo que la meta lo pida
           var delta, feliz1 = feliz0;
           try { delta = conEdificio(b.name, function () { var o = prodActual(); feliz1 = game.village.happiness; var dd = {}; nec.forEach(function (r) { dd[r] = (o[r] || 0) - (baseRates[r] || 0); }); return dd; }); } catch (e) { return; }
           // sirve si sube la producción de algo necesario (o lo potencia aunque hoy nadie trabaje en eso)
@@ -1045,7 +1042,6 @@
   }
 
   // =================== MODO EDIFICIOS (después de la meta) ===================
-  // ¿el precio pide algo escaso (titanium), directo o dentro de algo fabricado (alloy = steel + titanium)?
   // ---------- medioambiente (pedido el 2026-11-19: maximizar la curación) ----------
   // cuánto cambia la pollution por tick (antes de lo que limpian las plantas) con un edificio más, con la fórmula del juego:
   // cuenta lo que produce, las Factories automatizadas (−2) y la proporción de energía limpia (Solar Farms, Hydro Plants, Reactors)
@@ -1065,10 +1061,6 @@
     var base = polucionBase(), dl = deltaPolucion(name);
     return base > 0 && dl < 0 && -dl >= base * A.LIMPIA_MIN_PCT;
   }
-  function usaEscasos(precio) {
-    var bruto = faltante({}, [precio]);
-    return A.EDIFICIOS_SIN.some(function (r) { return bruto[r] > 0 || precio.some(function (x) { return x.name === r; }); });
-  }
   // candidatos: edificios desbloqueados que caben en el almacenamiento, ordenados por cuánto tardan
   async function rankingEdificios() {
     var M = medirSeguro(), lista = [];
@@ -1076,7 +1068,6 @@
     var cands = game.bld.buildingsData.filter(function (b) {
       if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0 || consumeSinSostener(b, M)) return false; // p. ej. un Magneto con el oil bajando
       if (contamina(b.name)) return false; // medioambiente: nada que suba la pollution
-      if (usaEscasos(game.bld.getPrices(b.name)) && !limpiaBastante(b.name)) return false; // p. ej. Mansion: el titanium queda para las mejoras (salvo Factories que limpian)
       var meta = game.bld.getBuildingExt(b.name).meta;
       if (meta.limitBuild && meta.val >= meta.limitBuild) return false;
       var p = game.bld.getPrices(b.name);
@@ -1326,7 +1317,7 @@
       }
     }
     else {
-    if (p.motivo === "meta") { // si los tratos dieron menos titanium de lo esperado, agrega más
+    { // si falta titanium (los tratos dieron menos, o una ayuda lo pide), agrega tratos con las Zebras
       var st0 = {}; game.resPool.resources.forEach(function (r) { st0[r.name] = r.value; });
       var fti = faltante(st0, [precios(p.type, p.name)]).titanium || 0, extra = fti > 0 ? pasosComercio(fti) : [];
       if (extra.length) { d.plan.pasos = extra.concat(d.plan.pasos); anotar("Faltan " + num(fti) + " de titanium: agrego " + extra.reduce(function (a, s) { return a + s.k; }, 0) + " tratos con las Zebras"); return; }
@@ -1926,8 +1917,8 @@
     ["lider", "Ascender al líder", "Sube de rango al líder cuando hay gold libre (25 × rango siguiente) y le alcanza la experiencia."],
     ["escasos", "Mantener (modo edificios)", "En el modo edificios deja gatitos para que Smelters, Calciners, Mints, Magnetos… nunca se queden sin insumos, guarda " + Math.round(A.COLCHON_SEG / 60) + " min de consumo y agrega Oil Wells si baja el oil."],
     ["mantenerSiempre", "Mantener también con tus metas", "Lo mismo que \"Mantener\", pero también mientras trabaja en tus metas y en la cola: ningún edificio se queda parado. La meta tarda algo más. Necesita \"Mantener\" encendido. Se aplica al calcular (vuelve a calcular después de cambiarlo)."],
-    ["edificios", "Modo edificios al terminar", "Al terminar la meta (o la cola), sigue comprando el edificio que tarde menos. No compra los que piden titanium."],
-    ["verde", "Cuidar el medioambiente", "Nunca compra edificios que suban la pollution (Mines, Quarries, Smelters, Calciners, Steamworks, Magnetos, Oil Wells, Factories sin automatización…), salvo que sean tu meta. En el modo edificios compra primero los que la bajan al menos " + Math.round(A.LIMPIA_MIN_PCT * 100) + " % (Factories automatizadas, Solar Farms, Hydro Plants, Reactors), aunque pidan titanium."],
+    ["edificios", "Modo edificios al terminar", "Al terminar la meta (o la cola), sigue comprando el edificio que tarde menos."],
+    ["verde", "Cuidar el medioambiente", "Nunca compra edificios que suban la pollution (Mines, Quarries, Smelters, Calciners, Steamworks, Magnetos, Oil Wells, Factories sin automatización…), salvo que sean tu meta. En el modo edificios compra primero los que la bajan al menos " + Math.round(A.LIMPIA_MIN_PCT * 100) + " % (Factories automatizadas, Solar Farms, Hydro Plants, Reactors)."],
     ["polucion", "Detalle de pollution", "Al pasar el mouse sobre la pollution (arriba del juego): cuánta produce y limpia cada edificio, el nivel y sus efectos, y cuánto falta para el nivel siguiente o para llegar a cero. Basado en Kittens Pollution Tooltip de xpg (MIT). Apagarlo se nota al recargar la página."]];
   function nombresConv(M) { return M.conv.map(function (c) { return etiqueta("buildings", c.nombre); }).join(", ") || "los conversores"; }
   function textoMant(mt) { return Object.keys(mt).map(function (j) { return mt[j] + " " + (JT[j] || j); }).join(" y "); }
@@ -1992,7 +1983,7 @@
       if (d.cola.length) return "<div style='color:#9aa3b2;margin-top:6px'>Presiona <b>Recalcular</b> para ver el plan, o <b>Empezar</b>.</div>";
       if (d.modoEdificios && d.on.edificios) return "<div style='color:#7fd19b;margin-top:6px;cursor:help' title=\"" + attr(rk ? "Últimos candidatos:\n" + rk : "") + "\">Modo edificios: buscando el que tarde menos… <button data-a='detener' style='" + est + ";background:#6b2f2f'>Detener</button></div>";
       return "<div style='color:#9aa3b2;margin-top:6px'>Elige una meta y presiona <b>Agregar</b>: se suma a la cola y se calcula el plan.</div>" +
-        "<div style='margin-top:4px'><button data-a='edificios' style='" + est + "' title='Sin meta: compra uno tras otro el edificio que tarde menos (sin los que piden titanium).'>Solo comprar edificios</button></div>";
+        "<div style='margin-top:4px'><button data-a='edificios' style='" + est + "' title='Sin meta: compra uno tras otro el edificio que tarde menos.'>Solo comprar edificios</button></div>";
     }
     var sinAy = Math.abs(tcomp(P.sim) - P.sinAyuda) > 1 ? "Sin los edificios sugeridos: " + (isFinite(P.sinAyuda) ? (P.sinAyuda > A.HORAS_MAX * 3600 ? "unas " : "") + tiempo(P.sinAyuda) : "nunca a ese ritmo") : "";
     var h = "";
