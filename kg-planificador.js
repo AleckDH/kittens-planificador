@@ -1115,13 +1115,30 @@
     var base = polucionBase(), dl = deltaPolucion(name);
     return base > 0 && dl < 0 && -dl >= base * A.LIMPIA_MIN_PCT;
   }
+  // lo que piden las investigaciones y mejoras del workshop disponibles (directo y en materias primas: science, manuscripts → culture…)
+  function recursosInvestigar() {
+    var listas = [], o = {};
+    game.science.techs.forEach(function (t) { if (t.unlocked && !t.researched) listas.push(precios("tech", t.name)); });
+    game.workshop.upgrades.forEach(function (u) { if (u.unlocked && !u.researched) listas.push(precios("upgrades", u.name)); });
+    listas.forEach(function (p) { p.forEach(function (x) { o[x.name] = true; }); });
+    Object.keys(faltante({}, listas)).forEach(function (r) { o[r] = true; });
+    return o;
+  }
+  // meta general (pedido el 2026-11-19): el modo edificios solo compra lo que sirve para investigar: produce o guarda algo
+  // que piden las investigaciones/mejoras, o suma gatitos. Nada que solo dé felicidad (Amphitheatre sin manuscripts pendientes…)
+  function sirveInvestigar(b, nec) {
+    var ef = Object.assign({}, b.effects || {}, b.effectsCalculated || {});
+    if ((ef.maxKittens || 0) > 0) return true; // más gatitos: más de todo
+    return Object.keys(ef).some(function (k) { return (ef[k] || 0) > 0 && Object.keys(nec).some(function (r) { return k.indexOf(r) === 0; }); });
+  }
   // candidatos: edificios desbloqueados que caben en el almacenamiento, ordenados por cuánto tardan
   async function rankingEdificios() {
-    var M = medirSeguro(), lista = [];
+    var M = medirSeguro(), lista = [], nec = recursosInvestigar();
     await esperar();
     var cands = game.bld.buildingsData.filter(function (b) {
       if (!b.unlocked || A.EDIFICIOS_EXCLUIR.indexOf(b.name) >= 0 || consumeSinSostener(b, M)) return false; // p. ej. un Magneto con el oil bajando
       if (contamina(b.name)) return false; // medioambiente: nada que suba la pollution
+      if (!sirveInvestigar(b, nec) && !limpiaBastante(b.name)) return false; // los que limpian siguen valiendo (opción "verde")
       var meta = game.bld.getBuildingExt(b.name).meta;
       if (meta.limitBuild && meta.val >= meta.limitBuild) return false;
       var p = game.bld.getPrices(b.name);
@@ -1234,6 +1251,10 @@
     delete falta.titanium; // va por comercio
     Object.keys(falta).forEach(function (r) {
       var j = mejorJob(M, r), b = M.base[r] || 0, conJ = j ? b + M.m[j][r] * M.N : b, conv = null;
+      if (r === "manpower") { // en M el catpower de los hunters figura ya cazado (como furs): se usa lo que juntan sin cazar
+        j = Object.keys(M.mpCrudo || {}).sort(function (a, b2) { return M.mpCrudo[b2] - M.mpCrudo[a]; })[0] || null;
+        conJ = j ? b + M.mpCrudo[j] * M.N - (consumoConv(M).manpower || 0) : b; // menos lo que se comen las Mints
+      }
       if (!j) M.conv.forEach(function (c) { if (c.outs[r] > 0) { conv = (conv ? conv + " y " : "") + etiqueta("buildings", c.nombre); conJ += c.outs[r]; } }); // todos los que lo producen (Smelters + Calciners)
       porRec.push({ r: r, falta: falta[r], job: j, conv: conv, t: conJ > 0 ? falta[r] / conJ : Infinity, solo: !j && !conv });
     });
@@ -1491,7 +1512,7 @@
       return;
     }
     if (pct > atasco.mejor + 0.001) { // avanzó: todo bien
-      atasco.mejor = pct; atasco.desde = segundos;
+      atasco.mejor = pct; atasco.desde = segundos; atasco.recalcClave = null;
       if (d.atasco) { d.atasco = null; anotar("El paso volvió a avanzar"); }
       return;
     }
@@ -1500,7 +1521,17 @@
     d.atasco = "Trabado hace " + tiempo(segundos - atasco.desde) + ": " + quien + (falta ? ". Según el juego falta: " + falta : ". Según el juego no falta nada: no pude comprarlo");
     atasco.desde = segundos; // vuelve a mirar en otro ATASCO_SEG
     anotar("⚠ " + d.atasco);
-    if (segundos - atasco.recalc >= A.ATASCO_RECALC_SEG) { // recalcula (como mucho una vez cada 10 min, para no quedar en un bucle)
+    // ya se recalculó por este mismo paso y sigue trabado: pasa a la meta siguiente de la cola (pedido el 2026-11-19);
+    // esta queda segunda y se vuelve a intentar después
+    if (atasco.recalcClave === clave && d.plan.deCola && !d.plan.metaHecha && d.cola.length > 1) {
+      var trabada = d.cola.splice(0, 1)[0]; d.cola.splice(1, 0, trabada);
+      atasco.recalcClave = null; atasco.recalc = segundos;
+      anotar("Paso a " + d.cola[0].label + "; " + trabada.label + " queda después (sigue trabada)");
+      d.plan = null; d.ejecutando = false; // el bucle arranca la meta siguiente de la cola (siguienteDeCola)
+      guardar(); return;
+    }
+    if (segundos - atasco.recalc >= A.ATASCO_RECALC_SEG) {
+      atasco.recalcClave = clave; // recalcula (como mucho una vez cada 10 min, para no quedar en un bucle)
       atasco.recalc = segundos; anotar("Recalculo el plan por el atasco");
       recalcular().then(function () { atasco.paso = null; guardar(); vista = pintarPlan(); pintar(); })
         .catch(function (e) { console.error(e); anotar("No pude recalcular: " + e.message); });
