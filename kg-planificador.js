@@ -179,6 +179,34 @@
     }
     return pasos;
   }
+  // Lo que falta y nadie produce (ni gatitos ni edificios encendidos): se compra a la raza que más da por trato
+  // (pedido el 2026-11-19: Telecommunication pide 50 uranium y el plan decía "nunca"; los Dragons lo venden por 250 titanium).
+  // El titanium que piden esos tratos se suma a lo que se consigue con las Zebras.
+  function pasosOtrasRazas(M, falta) {
+    var out = [], opciones = null;
+    Object.keys(falta).forEach(function (r) {
+      if (r === "titanium" || !(falta[r] > 1e-9) || mejorJob(M, r)) return;
+      if ((M.base[r] || 0) > 1e-9 || M.conv.some(function (c) { return c.outs[r] > 0; })) return; // ya entra (p. ej. Accelerator → uranium)
+      opciones = opciones || tratosRazas();
+      var mejor = null;
+      opciones.forEach(function (o) { if (o.race.name !== "zebras" && o.da[r] > 0 && o.compra !== r && (!mejor || o.da[r] > mejor.da[r])) mejor = o; });
+      if (mejor) out = out.concat(pasosRaza(mejor, r, falta[r]));
+    });
+    return out;
+  }
+  function pasosRaza(o, r, cant) {
+    var cz = caza(), n = Math.ceil(cant / o.da[r]), pasos = [];
+    var porTanda = Math.max(1, Math.min(n, Math.floor((R("gold").maxValue || Infinity) / o.gold), Math.floor((R(o.compra).maxValue || Infinity) / o.compraVal), 50));
+    for (var h = 0; h < n; h += porTanda) {
+      var k = Math.min(porTanda, n - h), gana = {}; gana[r] = o.da[r] * k;
+      pasos.push({ type: "trade", name: o.race.name, k: k, motivo: r, gana: gana,
+        reales: [{ name: "gold", val: o.gold * k }, { name: o.compra, val: o.compraVal * k }, { name: "manpower", val: o.catpower * k }],
+        p: [{ name: "gold", val: o.gold * k }, { name: o.compra, val: o.compraVal * k }, { name: "furs", val: o.catpower * k / cz.costo * cz.furs }] });
+    }
+    return pasos;
+  }
+  function textoGana(p) { return Object.keys(p.gana || {}).map(function (r) { return "~" + num(p.gana[r]) + " " + titulo(r); }).join(", "); }
+  function nombreRaza(n) { var r = game.diplomacy.get(n); return (r && r.title) || n; }
   // un trato para la simulación: paga gold y slabs, y su catpower (mp) sale del catpower real más lo que cazan los hunters.
   // Antes se pagaba con furs: con furs guardados todos los tratos de la cola salían al instante (8 Bio Labs "~ya" con 10 de catpower)
   function itemTrato(s) {
@@ -1025,7 +1053,7 @@
 
   // barcos: cada uno sube la probabilidad (+0,35 %) y la cantidad (+0,03) de titanium por trato.
   // Prueba fabricar más barcos antes de comerciar y se queda con la cantidad que termina antes.
-  async function planBarcos(M, prev, tratosAhora, pMeta, faltaTi, tBase) {
+  async function planBarcos(M, prev, tratosAhora, pMeta, faltaTi, tBase, otrosIt) {
     var r = rec("ship"); if (!r || !tratosAhora.length) return null;
     var porVez = Object.keys(r.porVez).map(function (q) { return { name: q, val: r.porVez[q] }; });
     var mejor = null, peores = 0, hay = R("ship").value;
@@ -1036,7 +1064,7 @@
       var tr = pasosComercio(faltaTi, extra);
       var paso = { type: "ship", name: "ship", veces: veces, barcos: extra, motivo: "barcos",
         p: porVez.map(function (x) { return { name: x.name, val: x.val * veces }; }), gana: { ship: extra } };
-      var items = prev.concat([{ p: paso.p, gana: paso.gana }]).concat(tr.map(itemTrato)).concat([{ p: pMeta }]);
+      var items = prev.concat([{ p: paso.p, gana: paso.gana }]).concat(tr.map(itemTrato)).concat((otrosIt || []).map(function (x) { return Object.assign({}, x); })).concat([{ p: pMeta }]);
       var t = tcomp(simular(M, items));
       await esperar();
       var ref = mejor ? mejor.t : tBase;
@@ -1182,18 +1210,25 @@
   }
   // Las metas que siguen en la cola, para simularlas después de la primera: cada una con sus tratos por titanium.
   // Se corta en la primera que no cabe en el tope (esa se calcula al llegar, con sus edificios de almacenamiento).
-  function itemsSiguientes(siguientes, previos, extraCap) {
+  function itemsSiguientes(siguientes, previos, extraCap, M) {
     var out = [], stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
-    var acum = previos.slice(), tiAntes = faltante(stock, acum).titanium || 0;
+    var acum = previos.slice(), tiAntes = faltante(stock, acum).titanium || 0, antes = faltante(stock, acum);
     for (var i = 0; i < siguientes.length; i++) {
       var s = siguientes[i], tf = topeFaltante(s.p);
       if (Object.keys(tf).some(function (r) { return tf[r] > ((extraCap || {})[r] || 0) + 1e-6; })) break;
       acum.push(s.p);
-      var tiAhora = faltante(stock, acum).titanium || 0, tiEsta = tiAhora - tiAntes; tiAntes = tiAhora;
+      // lo que esta meta suma de cosas que nadie produce (uranium…): tratos con otras razas, que piden titanium
+      var ahora = faltante(stock, acum), nuevo = {};
+      Object.keys(ahora).forEach(function (r) { var x = ahora[r] - (antes[r] || 0); if (x > 1e-9) nuevo[r] = x; });
+      var otros = M ? pasosOtrasRazas(M, nuevo) : [];
+      otros.forEach(function (x) { acum.push(x.p); });
+      antes = faltante(stock, acum);
+      var tiAhora = antes.titanium || 0, tiEsta = tiAhora - tiAntes; tiAntes = tiAhora;
       if (tiEsta > 0) {
         var tr = pasosComercio(tiEsta); if (!tr.length) break; // sin Zebras no se llega: se calcula al llegar
         tr.forEach(function (x) { out.push(itemTrato(x)); });
       }
+      otros.forEach(function (x) { out.push(itemTrato(x)); });
       out.push({ p: s.p, meta: s.i });
     }
     return out;
@@ -1209,26 +1244,29 @@
     var avisosSost = [], sost = planSostener(M, avisosSost), nSost = sost.length; alm.pasos = sost.concat(alm.pasos);
     // titanium: lo que falta se consigue comerciando con las Zebras
     var stock0 = {}; game.resPool.resources.forEach(function (r) { stock0[r.name] = r.value; });
-    var faltaTi = faltante(stock0, alm.pasos.map(function (s) { return s.p; }).concat([pMeta])).titanium || 0;
+    // lo que nadie produce (uranium…) se compra a otras razas; su titanium se suma al de las Zebras
+    var otros = pasosOtrasRazas(M, faltante(stock0, alm.pasos.map(function (s) { return s.p; }).concat([pMeta])));
+    var otrosIt = otros.map(itemTrato);
+    var faltaTi = faltante(stock0, alm.pasos.map(function (s) { return s.p; }).concat(otros.map(function (s) { return s.p; })).concat([pMeta])).titanium || 0;
     var tratos = pasosComercio(faltaTi);
     var itemsAlm = alm.pasos.map(function (s) { return { p: s.p, cap: s.cap }; });
-    var items = itemsAlm.concat(tratos.map(itemTrato)).concat([{ p: pMeta }]);
+    var items = itemsAlm.concat(tratos.map(itemTrato)).concat(otrosIt).concat([{ p: pMeta }]);
     var base = simular(M, items, null, null), tAhora = tcomp(base);
     var tAhoraSinNada = tAhora; // para mostrar cuánto ahorran barcos y ayudas
     // ¿conviene fabricar barcos antes de comerciar?
-    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora), pasoBarcos = [];
+    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora, otrosIt), pasoBarcos = [];
     if (barcos) {
       tratos = barcos.tratos; pasoBarcos = [barcos.paso]; tAhora = barcos.t;
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
-        .concat(tratos.map(itemTrato)).concat([{ p: pMeta }]);
+        .concat(tratos.map(itemTrato)).concat(otrosIt).concat([{ p: pMeta }]);
     }
     // el resto de la cola: las ayudas se eligen para terminar la cola entera antes, sin atrasar esta meta
-    var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra);
+    var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra, M);
     var ayudas = await planAyudas(M, items, tAhora, sig);
     // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
     // las ayudas "después" (para las metas siguientes de la cola) van tras la meta: no la atrasan
     var ayA = ayudas.filter(function (a) { return !a.despues; }), ayD = ayudas.filter(function (a) { return a.despues; });
-    var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
+    var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat(otros).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
     // simulación final con todo (hasta la meta: su tiempo es el que se muestra)
     var itemsF = items.slice(0, nSost).concat(ayA.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
     // festival: ¿la cola entera (esta meta, sus ayudas "después" y las siguientes) termina antes con uno ahora?
@@ -1469,7 +1507,7 @@
 
   // ---------- pasos: hechos, actual y su avance ----------
   function textoPaso(p) {
-    if (p.type === "trade") return "Comerciar " + (p.k > 0 ? p.k : (p.kHechos || 0)) + " veces con las Zebras <span style='color:#9aa3b2'>(~" + num(p.gana.titanium) + " titanium)</span>";
+    if (p.type === "trade") return "Comerciar " + (p.k > 0 ? p.k : (p.kHechos || 0)) + " veces con " + nombreRaza(p.name || "zebras") + " <span style='color:#9aa3b2'>(" + textoGana(p) + ")</span>";
     if (p.type === "festival") return "Festival <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + " en la cola; dura 1 año)</span>";
     if (p.type === "ship") {
       var rinde = (rec("ship") || { rinde: 1 }).rinde, zb = zebras(p.veces * rinde);
@@ -1597,7 +1635,7 @@
   // un paso en pocas palabras (el detalle va en el tooltip, con textoPaso)
   function cortoPaso(p) {
     var g = function (t) { return " <span style='color:#9aa3b2;font-size:11.5px'>" + t + "</span>"; };
-    if (p.type === "trade") return "Zebras ×" + (p.k > 0 ? p.k : (p.kHechos || 0)) + g("~" + num(p.gana.titanium) + " titanium");
+    if (p.type === "trade") return nombreRaza(p.name || "zebras") + " ×" + (p.k > 0 ? p.k : (p.kHechos || 0)) + g(textoGana(p));
     if (p.type === "ship") return "Barcos ×" + Math.round(p.veces * ((rec("ship") || { rinde: 1 }).rinde)) + (p.ahorro > 0 ? g("−" + tiempo(p.ahorro)) : "");
     if (p.type === "festival") return "Festival" + g(isFinite(p.ahorro) ? "−" + tiempo(p.ahorro) : "");
     var n = etiqueta(p.type, p.name);
@@ -1678,17 +1716,27 @@
   }
 
   function comerciar(p) {
-    var z = zebras(); if (!z) return;
+    var race = game.diplomacy.get(p.name || "zebras"); if (!race || !race.unlocked) return;
     fabricarHacia(p.reales); // slabs
-    var dip = game.diplomacy, max = dip.getMaxTradeAmt(z.race) || 0, n = Math.min(p.k, max);
-    if (n < 1) return;
-    var antes = R("titanium").value;
-    dip.tradeMultiple(z.race, n);
+    var dip = game.diplomacy, max = dip.getMaxTradeAmt(race) || 0, n = Math.min(p.k, max);
+    if (n < 1) {
+      // otra raza que cobra en titanium (Dragons) y no alcanza (las Zebras dieron menos): más tratos con las Zebras antes
+      var ti = (p.reales || []).filter(function (x) { return x.name === "titanium"; })[0];
+      var faltaT = ti && race.name !== "zebras" ? ti.val / Math.max(1, p.k) - R("titanium").value : 0;
+      if (faltaT > 0) {
+        var extra = pasosComercio(ti.val - R("titanium").value);
+        if (extra.length) { d.plan.pasos = extra.concat(d.plan.pasos); anotar("Faltan " + num(ti.val - R("titanium").value) + " de titanium para " + nombreRaza(race.name) + ": agrego " + extra.reduce(function (a, s) { return a + s.k; }, 0) + " tratos con las Zebras"); }
+      }
+      return;
+    }
+    var antes = {}; Object.keys(p.gana || {}).forEach(function (r) { antes[r] = R(r).value; });
+    dip.tradeMultiple(race, n);
     var queda = (p.k - n) / p.k; // lo que pide el paso baja con los tratos hechos (si no, reservaba gold y catpower de más)
     ["reales", "p"].forEach(function (k) { p[k] = p[k].map(function (x) { return { name: x.name, val: x.val * queda }; }); });
-    if (p.gana) p.gana = { titanium: p.gana.titanium * queda };
-    p.k -= n; p.kHechos = (p.kHechos || 0) + n; sumar("tratos", n); sumar("titanium", R("titanium").value - antes);
-    anotar("Comercié " + n + " veces con las Zebras: +" + num(R("titanium").value - antes) + " titanium");
+    var gano = Object.keys(antes).map(function (r) { return "+" + num(R(r).value - antes[r]) + " " + titulo(r); }).join(", ");
+    if (p.gana) Object.keys(p.gana).forEach(function (r) { p.gana[r] *= queda; });
+    p.k -= n; p.kHechos = (p.kHechos || 0) + n; sumar("tratos", n); if ("titanium" in antes) sumar("titanium", R("titanium").value - antes.titanium);
+    anotar("Comercié " + n + " veces con " + race.title + ": " + (gano || "nada"));
     if (p.k <= 0) { terminarPaso(); ultimoReparto = -999; guardar(); }
   }
 
@@ -2240,7 +2288,7 @@
     // avisos: una línea cada uno, el texto completo al pasar el mouse
     if (d.atasco && d.ejecutando) h += avisoCorto(d.atasco, "#e57373");
     (P.avisos || []).forEach(function (a) { h += avisoCorto(a, "#e0b050"); });
-    if (P.imposible) h += avisoCorto("No encontré cómo subir el tope de: " + Object.keys(P.imposible).map(titulo).join(", "), "#e57373");
+    if (P.imposible) h += avisoCorto("Sin tope para " + Object.keys(P.imposible).map(titulo).join(", ") + ": no encontré edificios que lo suban lo suficiente", "#e57373");
     if (P.sinZebras) h += avisoCorto("Sin Zebras: faltan " + num(P.faltaTi) + " de titanium: no puedes comerciar con las Zebras todavía (necesitas al menos 1 barco)", "#e57373");
     if (!isFinite(P.sim.t) && P.sim.avance) { // no alcanza en el límite: hasta dónde llega
       h += det("avance", "En " + textoLimite() + " llegarías a…", P.sim.avance.slice(0, 5).map(function (x) {
