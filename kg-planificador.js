@@ -153,11 +153,11 @@
   }
 
   // ---------- comercio con las Zebras (fórmula del juego) ----------
-  function zebras(extraBarcos) {
+  function zebras(extraBarcos, extraStanding) { // extraStanding: lo que suben los Tradeposts que se agregarían (con Caravanserai)
     var dip = game.diplomacy, z = dip.get("zebras");
     if (!z || !z.unlocked) return null;
     var barcos = R("ship").value + (extraBarcos || 0), vol = dip.getTradeVolume ? dip.getTradeVolume() : 1;
-    var exito = Math.max(0, Math.min(1, 1 + dip.getFinalStanding(z)));
+    var exito = Math.max(0, Math.min(1, 1 + Math.min(0, dip.getFinalStanding(z) + (extraStanding || 0))));
     var prob = Math.min(1, 0.15 + barcos * 0.0035);
     var rel = game.getEffect("zebraRelationModifier") * (game.bld.getBuildingExt("tradepost").meta.effects["tradeRatio"] || 0);
     var cant = (1.5 + barcos * 0.03) * (1 + rel) * vol;
@@ -165,8 +165,8 @@
       catpower: dip.getManpowerCost(), gold: dip.getGoldCost(), compra: z.buys[0].name, compraVal: z.buys[0].val * vol };
   }
   // pasos de comercio para conseguir cierta cantidad de titanium
-  function pasosComercio(faltaTi, extraBarcos) {
-    var z = zebras(extraBarcos); if (!z || z.ti <= 0 || faltaTi <= 0) return [];
+  function pasosComercio(faltaTi, extraBarcos, extraStanding) {
+    var z = zebras(extraBarcos, extraStanding); if (!z || z.ti <= 0 || faltaTi <= 0) return [];
     var cz = caza(), n = Math.ceil(faltaTi / z.ti), goldTope = R("gold").maxValue || Infinity;
     var porTanda = Math.max(1, Math.min(n, Math.floor(goldTope / z.gold), 50)), pasos = [];
     for (var hechos = 0; hechos < n; hechos += porTanda) {
@@ -1060,7 +1060,7 @@
     var pruebas = [1, 2, 3, 5, 8, 12, 17, 25, 35, 50];
     for (var i = 0; i < pruebas.length; i++) {
       var veces = pruebas[i], extra = veces * r.rinde;
-      if (hay + extra > A.MAX_BARCOS + r.rinde) break;
+      // (antes paraba a los 243 barcos, cuando la probabilidad llega al 100 %; pero cada barco sigue sumando +0,03 titanium por trato)
       var tr = pasosComercio(faltaTi, extra);
       var paso = { type: "ship", name: "ship", veces: veces, barcos: extra, motivo: "barcos",
         p: porVez.map(function (x) { return { name: x.name, val: x.val * veces }; }), gana: { ship: extra } };
@@ -1072,6 +1072,34 @@
       else if (++peores >= 2) break; // ya no mejora
     }
     if (mejor) mejor.paso.ahorro = tBase - mejor.t;
+    return mejor;
+  }
+
+  // Tradeposts: con Caravanserai cada uno sube la relación con las Zebras (+0,35 %): menos tratos fallidos y más titanium.
+  // Prueba construir algunos antes de comerciar (hasta llegar al 100 % de éxito) y se queda con la cantidad que termina antes.
+  async function planTradeposts(M, prev, pasoBarcos, pMeta, faltaTi, tBase, otrosIt) {
+    var z = zebras(); if (!z || !faltaTi || z.exito >= 1) return null;
+    var tp = game.bld.getBuildingExt("tradepost"), sube = (tp.meta.effects || {}).standingRatio || 0;
+    if (!(sube > 0) || !tp.meta.unlocked) return null; // sin Caravanserai no cambian el titanium
+    var barcos = pasoBarcos[0] ? pasoBarcos[0].barcos : 0, hasta = Math.ceil((1 - z.exito) / sube - 1e-9);
+    var mejor = null, peores = 0, pruebas = [1, 2, 3, 5, 8, 12, 17, 25, 35, 50, 70, 100].filter(function (n) { return n < hasta; }).concat([hasta]);
+    for (var i = 0; i < pruebas.length; i++) {
+      var n = pruebas[i], pasos = [];
+      for (var k = 0; k < n; k++) {
+        var p = game.bld.getPrices("tradepost", k); if (game.resPool.isStorageLimited(p)) break;
+        pasos.push({ type: "buildings", name: "tradepost", p: p, motivo: "tratos" });
+      }
+      if (pasos.length < n) break; // ya no caben
+      var tr = pasosComercio(faltaTi, barcos, n * sube);
+      var items = prev.concat(pasos.map(function (x) { return { p: x.p }; })).concat(pasoBarcos.map(function (x) { return { p: x.p, gana: x.gana }; }))
+        .concat(tr.map(itemTrato)).concat((otrosIt || []).map(function (x) { return Object.assign({}, x); })).concat([{ p: pMeta }]);
+      var t = tcomp(simular(M, items));
+      await esperar();
+      var ref = mejor ? mejor.t : tBase;
+      if (t < ref - 60) { mejor = { pasos: pasos, tratos: tr, t: t, n: n }; peores = 0; }
+      else if (++peores >= 2) break;
+    }
+    if (mejor) mejor.pasos.forEach(function (x) { x.ahorro = (tBase - mejor.t) / mejor.n; x.exito = Math.min(1, z.exito + mejor.n * sube); });
     return mejor;
   }
 
@@ -1260,13 +1288,20 @@
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
         .concat(tratos.map(itemTrato)).concat(otrosIt).concat([{ p: pMeta }]);
     }
+    // ¿conviene construir Tradeposts antes? (con Caravanserai suben el éxito con las Zebras: +0,35 % c/u)
+    var postes = await planTradeposts(M, itemsAlm, pasoBarcos, pMeta, faltaTi, tAhora, otrosIt), pasosPostes = [];
+    if (postes) {
+      tratos = postes.tratos; pasosPostes = postes.pasos; tAhora = postes.t;
+      items = itemsAlm.concat(pasosPostes.map(function (x) { return { p: x.p }; })).concat(pasoBarcos.map(function (x) { return { p: x.p, gana: x.gana }; }))
+        .concat(tratos.map(itemTrato)).concat(otrosIt).concat([{ p: pMeta }]);
+    }
     // el resto de la cola: las ayudas se eligen para terminar la cola entera antes, sin atrasar esta meta
     var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra, M);
     var ayudas = await planAyudas(M, items, tAhora, sig);
     // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
     // las ayudas "después" (para las metas siguientes de la cola) van tras la meta: no la atrasan
     var ayA = ayudas.filter(function (a) { return !a.despues; }), ayD = ayudas.filter(function (a) { return a.despues; });
-    var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasoBarcos).concat(tratos).concat(otros).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
+    var pasos = alm.pasos.slice(0, nSost).concat(ayA).concat(alm.pasos.slice(nSost)).concat(pasosPostes).concat(pasoBarcos).concat(tratos).concat(otros).concat([{ type: type, name: name, p: pMeta, motivo: "meta" }]).concat(ayD);
     // simulación final con todo (hasta la meta: su tiempo es el que se muestra)
     var itemsF = items.slice(0, nSost).concat(ayA.map(function (a) { return { p: a.p, M: a.M }; })).concat(items.slice(nSost));
     // festival: ¿la cola entera (esta meta, sus ayudas "después" y las siguientes) termina antes con uno ahora?
@@ -1517,6 +1552,7 @@
     return (p.motivo === "meta" ? "<b>" + etiqueta(p.type, p.name) + "</b>" : "Construir " + etiqueta(p.type, p.name)) +
       (p.motivo === "almacenamiento" ? " <span style='color:#e0b050'>(falta tope)</span>" : "") +
       (p.motivo === "sostener" ? " <span style='color:#e0b050'>(para no quedarte sin " + titulo(p.recurso) + ")</span>" : "") +
+      (p.motivo === "tratos" ? " <span style='color:#7fd19b'>(más éxito con las Zebras: " + Math.round((p.exito || 1) * 100) + " %; " + textoAhorro(p.ahorro) + " c/u)</span>" : "") +
       (p.motivo === "adelanta la meta" ? " <span style='color:#7fd19b'>(" + textoAhorro(p.ahorro) + (p.paraCola ? " en la cola" : "") + (p.despues ? "; después de la meta, no la atrasa" : "") + ")</span>" : "");
   }
   function terminarPaso() {
@@ -1642,6 +1678,7 @@
     if (p.motivo === "meta") return "<b>" + n + "</b>";
     if (p.motivo === "almacenamiento") return n + g("tope");
     if (p.motivo === "sostener") return n + g(titulo(p.recurso));
+    if (p.motivo === "tratos") return n + g("Zebras " + Math.round((p.exito || 1) * 100) + " %");
     if (p.motivo === "adelanta la meta") return n + g((isFinite(p.ahorro) ? "−" + tiempo(p.ahorro) : "necesario") + (p.despues ? ", después" : ""));
     return n;
   }
@@ -2645,7 +2682,7 @@
     rankingEdificios: rankingEdificios, siguienteEdificio: siguienteEdificio,
     colchones: colchones, consumoPorSeg: consumoPorSeg, encenderConsumidores: encenderConsumidores,
     tratosRazas: tratosRazas, rentabilidad: rentabilidad, ascenderLider: ascenderLider, faltaPlanAhora: faltaPlanAhora,
-    planAyudas: planAyudas, faltante: faltante, prodActual: prodActual, itemsSiguientes: itemsSiguientes, prefabricarCola: prefabricarCola, preciosCola: preciosCola, calcularCola: calcularCola, evaluarFestival: evaluarFestival } };
+    planAyudas: planAyudas, faltante: faltante, prodActual: prodActual, itemsSiguientes: itemsSiguientes, prefabricarCola: prefabricarCola, preciosCola: preciosCola, calcularCola: calcularCola, evaluarFestival: evaluarFestival, planTradeposts: planTradeposts } };
   vista = pintarPlan(); pintar();
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     var rm = retomar.meta, calc;
