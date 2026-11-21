@@ -39,6 +39,7 @@
   var VIEJOS = [window.__kgAuto, window.__kgReparto, window.__kgPlan];
   VIEJOS.forEach(function (v) { if (!v) return; if (v.timer) clearInterval(v.timer); if (v.caja) v.caja.remove(); });
 
+  var VERSION = "2026-11-21 juntar"; // se ve en el título del panel: así se sabe qué versión cargó el marcador
   var CLAVE = "kgPlanificador";
   var d = (window.__kgPlan && window.__kgPlan.d) || null, retomar = null;
   if (!d) { // al recargar la página: recupera opciones, bitácora y el plan que iba
@@ -2438,7 +2439,7 @@
     return "<div style='font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help' title=\"" + attr(tip || sinHtml(txt)) + "\"><b>" + nombre + ":</b> " + txt + "</div>";
   }
   function pintar() {
-    var h = '<div style="display:flex;align-items:center;gap:8px"><b style="flex:1;font-size:14px">Planificador</b><button data-a="x" style="' + est + '" title="Cerrar el panel (los automáticos se detienen)">✕</button></div>';
+    var h = '<div style="display:flex;align-items:center;gap:8px"><b style="flex:1;font-size:14px">Planificador <span style="font-weight:normal;font-size:11px;color:#9aa3b2" title="Versión cargada: si no coincide con la última, recarga la página (F5) y vuelve a usar el marcador">v' + VERSION + '</span></b><button data-a="x" style="' + est + '" title="Cerrar el panel (los automáticos se detienen)">✕</button></div>';
     h += '<div style="display:flex;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:240px">' + opcionesMeta() + "</select>" +
       '<button data-a="colaAgregar" style="' + est + ';background:#2a4a6b" title="Agrega esta meta al final de la cola y calcula el mejor plan para toda la cola">Agregar</button></div>' +
       '<div style="display:flex;gap:6px;margin:4px 0 2px;flex-wrap:wrap"><select id="kgP_rec" style="' + est + ';max-width:240px">' + opcionesRecurso() + "</select>" +
