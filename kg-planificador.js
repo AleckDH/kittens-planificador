@@ -39,7 +39,7 @@
   var VIEJOS = [window.__kgAuto, window.__kgReparto, window.__kgPlan];
   VIEJOS.forEach(function (v) { if (!v) return; if (v.timer) clearInterval(v.timer); if (v.caja) v.caja.remove(); });
 
-  var VERSION = "2026-11-21 juntar barcos"; // se ve en el título del panel: así se sabe qué versión cargó el marcador
+  var VERSION = "2026-11-21 barcos uranium"; // se ve en el título del panel: así se sabe qué versión cargó el marcador
   var CLAVE = "kgPlanificador";
   var d = (window.__kgPlan && window.__kgPlan.d) || null, retomar = null;
   if (!d) { // al recargar la página: recupera opciones, bitácora y el plan que iba
@@ -1281,7 +1281,7 @@
     var M = medirSeguro();
     await esperar();
     var pMeta = precios(type, name);
-    // "Juntar": nada de compras (ni almacenamiento, Tradeposts, ayudas ni festival); juntando titanium sí fabrica barcos si llega antes
+    // "Juntar": nada de compras (ni almacenamiento, Tradeposts, ayudas ni festival); sí fabrica barcos si llega antes (titanium, o uranium: los Dragons cobran titanium)
     var junta = type === "juntar";
     var alm = junta ? { pasos: [], extra: {} } : await planAlmacen(M, pMeta);
     // primero: edificios para que no se acabe lo que consumen tus edificios y no depende de gatitos (oil → Oil Wells)
@@ -1298,7 +1298,8 @@
     var base = simular(M, items, null, null), tAhora = tcomp(base);
     var tAhoraSinNada = tAhora; // para mostrar cuánto ahorran barcos y ayudas
     // ¿conviene fabricar barcos antes de comerciar?
-    var barcos = (junta && name !== "titanium") ? null : await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora, otrosIt), pasoBarcos = [];
+    // (también en "Juntar": solo si hay tratos con las Zebras, p. ej. titanium, o uranium porque los Dragons cobran titanium)
+    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora, otrosIt), pasoBarcos = [];
     if (barcos) {
       tratos = barcos.tratos; pasoBarcos = [barcos.paso]; tAhora = barcos.t;
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
@@ -2444,7 +2445,7 @@
     h += '<div style="display:flex;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:240px">' + opcionesMeta() + "</select>" +
       '<button data-a="colaAgregar" style="' + est + ';background:#2a4a6b" title="Agrega esta meta al final de la cola y calcula el mejor plan para toda la cola">Agregar</button></div>' +
       '<div style="display:flex;gap:6px;margin:4px 0 2px;flex-wrap:wrap"><select id="kgP_rec" style="' + est + ';max-width:240px">' + opcionesRecurso() + "</select>" +
-      '<button data-a="juntar" style="' + est + ';background:#2f6b45" title="No compra nada: junta este recurso hasta el tope (sin tope, de a tandas) con los gatitos, fabricando o comerciando (titanium con las Zebras, antes fabricando trade ships si así llega antes; uranium con los Dragons…), hasta que presiones Detener. La cola queda guardada.">Juntar</button></div>';
+      '<button data-a="juntar" style="' + est + ';background:#2f6b45" title="No compra nada: junta este recurso hasta el tope (sin tope, de a tandas) con los gatitos, fabricando o comerciando (titanium con las Zebras; uranium con los Dragons, que cobran titanium…). Si así llega antes, primero fabrica trade ships (más titanium por trato con las Zebras), hasta que presiones Detener. La cola queda guardada.">Juntar</button></div>';
     if (d.catnipAlerta) h += "<div style='color:#e57373;font-weight:bold;margin-top:4px'>⚠ " + d.catnipAlerta + "</div>";
     h += htmlCola();
     h += '<div id="kgP_plan">' + vista + "</div>";
