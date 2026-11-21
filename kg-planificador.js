@@ -104,7 +104,15 @@
 
   // ---------- comprar cualquier cosa por la misma vía que la cola del juego ----------
   function cm(type, name) { try { return game.time.queue.getQueueElementControllerAndModel({ name: name, type: type }); } catch (e) { return null; } }
+  // "Juntar" (pedido el 2026-11-21): no compra nada, solo junta un recurso hasta el tope; sin tope, de a tandas y sigue
+  function objetivoJuntar(r) {
+    var x = R(r); if (!x) return 0;
+    if (x.maxValue > 0) return x.maxValue;
+    if (!(d.juntarMeta > x.value + 1e-6)) d.juntarMeta = x.value + Math.max(100, x.value * 0.5); // sin tope: +50 % (o +100) y al llegar, otra tanda
+    return d.juntarMeta;
+  }
   function precios(type, name) {
+    if (type === "juntar") return [{ name: name, val: objetivoJuntar(name) }];
     if (type === "buildings") return game.bld.getPrices(name);
     var c = cm(type, name); return c && c.model ? (c.model.prices || []) : [];
   }
@@ -116,6 +124,7 @@
     return false;
   }
   function etiqueta(type, name) {
+    if (type === "juntar") return "Juntar " + titulo(name);
     try {
       if (type === "buildings") return game.bld.getBuildingExt(name).get("label") || name;
       if (type === "tech") return game.science.get(name).label;
@@ -1271,7 +1280,8 @@
     var M = medirSeguro();
     await esperar();
     var pMeta = precios(type, name);
-    var alm = await planAlmacen(M, pMeta);
+    var junta = type === "juntar"; // "Juntar": nada de compras (ni almacenamiento, barcos, Tradeposts, ayudas ni festival)
+    var alm = junta ? { pasos: [], extra: {} } : await planAlmacen(M, pMeta);
     // primero: edificios para que no se acabe lo que consumen tus edificios y no depende de gatitos (oil → Oil Wells)
     var avisosSost = [], sost = planSostener(M, avisosSost), nSost = sost.length; alm.pasos = sost.concat(alm.pasos);
     // titanium: lo que falta se consigue comerciando con las Zebras
@@ -1286,14 +1296,14 @@
     var base = simular(M, items, null, null), tAhora = tcomp(base);
     var tAhoraSinNada = tAhora; // para mostrar cuánto ahorran barcos y ayudas
     // ¿conviene fabricar barcos antes de comerciar?
-    var barcos = await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora, otrosIt), pasoBarcos = [];
+    var barcos = junta ? null : await planBarcos(M, itemsAlm, tratos, pMeta, faltaTi, tAhora, otrosIt), pasoBarcos = [];
     if (barcos) {
       tratos = barcos.tratos; pasoBarcos = [barcos.paso]; tAhora = barcos.t;
       items = itemsAlm.concat([{ p: barcos.paso.p, gana: barcos.paso.gana }])
         .concat(tratos.map(itemTrato)).concat(otrosIt).concat([{ p: pMeta }]);
     }
     // ¿conviene construir Tradeposts antes? (con Caravanserai suben el éxito con las Zebras: +0,35 % c/u)
-    var postes = await planTradeposts(M, itemsAlm, pasoBarcos, pMeta, faltaTi, tAhora, otrosIt), pasosPostes = [];
+    var postes = junta ? null : await planTradeposts(M, itemsAlm, pasoBarcos, pMeta, faltaTi, tAhora, otrosIt), pasosPostes = [];
     if (postes) {
       tratos = postes.tratos; pasosPostes = postes.pasos; tAhora = postes.t;
       items = itemsAlm.concat(pasosPostes.map(function (x) { return { p: x.p }; })).concat(pasoBarcos.map(function (x) { return { p: x.p, gana: x.gana }; }))
@@ -1301,7 +1311,7 @@
     }
     // el resto de la cola: las ayudas se eligen para terminar la cola entera antes, sin atrasar esta meta
     var sig = itemsSiguientes(siguientes, items.map(function (x) { return x.p; }), alm.extra, M);
-    var ayudas = await planAyudas(M, items, tAhora, sig);
+    var ayudas = junta ? [] : await planAyudas(M, items, tAhora, sig);
     // mismo orden que la simulación: primero lo que sostiene la producción, las ayudas, almacenamiento, barcos, tratos y la meta
     // las ayudas "después" (para las metas siguientes de la cola) van tras la meta: no la atrasan
     var ayA = ayudas.filter(function (a) { return !a.despues; }), ayD = ayudas.filter(function (a) { return a.despues; });
@@ -1311,7 +1321,7 @@
     // festival: ¿la cola entera (esta meta, sus ayudas "después" y las siguientes) termina antes con uno ahora?
     await esperar();
     var itemsD = ayD.map(function (a) { return { p: a.p, M: a.M }; });
-    var fest = evaluarFestival(M, itemsF.concat(itemsD).concat(sig));
+    var fest = junta ? null : evaluarFestival(M, itemsF.concat(itemsD).concat(sig));
     if (fest && fest.conviene) { itemsF = [Object.assign({}, fest.item)].concat(itemsF); pasos.unshift(pasoFestival(fest)); }
     var fin = (ayA.length || barcos || nSost || (fest && fest.conviene)) ? simular(M, itemsF) : base;
     itemsF = itemsF.concat(itemsD);
@@ -1464,13 +1474,13 @@
     d.ritmoTratos = esAuto() ? slabsParaTratos(M) : {}; // lo que se junta por segundo para los slabs de los tratos (modo edificios)
     var stock = {}; game.resPool.resources.forEach(function (r) { stock[r.name] = r.value; });
     var despues = d.plan.pasos.slice(1).map(function (p) { return p.p; }).concat(!d.plan.deCola ? [] : d.plan.metaHecha ? preciosCola(0) : d.cola.length > 1 ? preciosCola(1) : []);
-    var p0 = d.plan.pasos[0].p;
-    if (d.plan.pasos[0].reales && d.plan.pasos[0].reales.some(function (x) { return x.name === "manpower"; })) { // tratos y festival
+    var p0 = d.plan.pasos[0].p, pr0 = d.plan.pasos[0].reales || p0;
+    if (pr0.some(function (x) { return x.name === "manpower"; })) { // tratos, festival y "Juntar catpower"
       // en un trato, p cuenta su catpower como los furs que se dejan de cazar: con furs guardados parecía cubierto,
       // nadie cazaba y el catpower quedaba en 10 (pasó el 2026-11-19, 7 tratos trabados). Ahora pide lo que de verdad falta.
-      var mpPide = (d.plan.pasos[0].reales.filter(function (x) { return x.name === "manpower"; })[0] || { val: 0 }).val;
+      var mpPide = (pr0.filter(function (x) { return x.name === "manpower"; })[0] || { val: 0 }).val;
       var mpFalta = Math.max(0, Math.min(mpPide, (R("manpower").maxValue || Infinity) * 0.9) - R("manpower").value), czA = caza();
-      p0 = p0.filter(function (x) { return x.name !== "furs"; });
+      p0 = p0.filter(function (x) { return x.name !== "furs" && x.name !== "manpower"; }); // el catpower lo juntan los hunters (en M figura como furs)
       if (mpFalta > 0) p0.push({ name: "furs", val: (R("furs").value || 0) + mpFalta / czA.costo * czA.furs });
     }
     var a = politica(M, stock, [p0], d.jobActual, despues);
@@ -1510,6 +1520,7 @@
         if (festival(resFe)) { terminarPaso(); ultimoReparto = -999; d.reestimar = true; guardar(); }
       }
     }
+    else if (p.type === "juntar") juntarPaso(p);
     else if (p.type === "ship") { // fabricar barcos por tandas, a medida que alcanza
       fabricarHacia(p.p);
       var cs = game.workshop.getCraft("ship"), n = p.veces;
@@ -1544,6 +1555,25 @@
     if (segundos - ultimoReparto >= A.REPLANEAR_SEG) { ultimoReparto = segundos; aplicarReparto(); }
   }
 
+  // "Juntar": nunca se compra ni termina (hasta que la detengas). Fabrica lo que se fabrica, agrega tratos para lo que se
+  // consigue comerciando (titanium con las Zebras, uranium con los Dragons…) y, sin tope, al llegar sigue con otra tanda.
+  function juntando() { return d.plan && d.plan.type === "juntar" && d.ejecutando ? d.plan.name : null; }
+  function juntarPaso(p) {
+    var r = p.name, x = R(r), obj = objetivoJuntar(r); p.p = [{ name: r, val: obj }];
+    if (x.value >= obj - 1e-6) {
+      if (x.maxValue > 0) { if (!p.lleno) { p.lleno = true; anotar("Juntar " + titulo(r) + ": lleno (" + num(x.value) + "). Sigo atento hasta que lo detengas"); } return; }
+      d.juntarMeta = null; obj = objetivoJuntar(r); p.p = [{ name: r, val: obj }];
+      anotar("Juntar " + titulo(r) + ": llegué a " + num(x.value) + "; sigo hasta " + num(obj)); d.reestimar = true; ultimoReparto = -999; return;
+    }
+    p.lleno = false;
+    var falta = obj - x.value, extra = [];
+    if (r === "titanium") { var z = zebras(); if (z && falta >= z.ti) extra = pasosComercio(falta); } // al menos un trato de lo que falta (no se pasa del tope)
+    else if (!esFab(r) && d.plan.M && !mejorJob(d.plan.M, r) && !((game.getResourcePerTick(r, true) || 0) > 0)) {
+      var o = {}; o[r] = falta; extra = pasosOtrasRazas(d.plan.M, o).filter(function (s) { return s.gana[r] / s.k <= falta + 1e-9; });
+    }
+    if (extra.length) { d.plan.pasos = extra.concat(d.plan.pasos); anotar("Juntar " + titulo(r) + ": agrego " + extra.reduce(function (a, s) { return a + s.k; }, 0) + " tratos con " + nombreRaza(extra[0].name)); ultimoReparto = -999; d.reestimar = true; return; }
+    if (esFab(r)) fabricarHacia(p.p); // steel, plates, concrete…: fabrica en cadena con lo que hay
+  }
   // ---------- pasos: hechos, actual y su avance ----------
   function textoPaso(p) {
     if (p.type === "trade") return "Comerciar " + (p.k > 0 ? p.k : (p.kHechos || 0)) + " veces con " + nombreRaza(p.name || "zebras") + " <span style='color:#9aa3b2'>(" + textoGana(p) + ")</span>";
@@ -1580,7 +1610,9 @@
   var atasco = { paso: null, mejor: -1, desde: 0, recalc: -1e9 };
   function vigilarAtasco() {
     if (!d.plan || !d.ejecutando || d.pausa || calculando || !d.plan.pasos.length) { atasco.paso = null; return; }
-    var p = d.plan.pasos[0], av = avancePaso(p);
+    var p = d.plan.pasos[0];
+    if (p.type === "juntar" && p.lleno) { atasco.paso = null; d.atasco = null; return; } // lleno: esperando, no trabado
+    var av = avancePaso(p);
     var pct = av.length ? av.reduce(function (s, x) { return s + x.pct; }, 0) / av.length : 1;
     if (p.type === "trade") pct += (p.kHechos || 0) * 1e-3; // cada trato hecho cuenta como avance
     if (p.type === "ship") pct -= (p.veces || 0) * 1e-3;
@@ -1706,6 +1738,7 @@
     return t - (ahora - P.simDesde - ((P.pausado || 0) - (P.simPausado || 0))) / 1000;
   }
   function textoRestante(P) {
+    if (P.type === "juntar" && P.pasos[0] && P.pasos[0].lleno) return "lleno";
     if (!d.ejecutando || !isFinite(tcomp(P.sim))) return tiempoPlan(P.sim);
     var r = restante(P);
     if (r <= 0) { if (Date.now() - (P.reestimadoEn || 0) > 30000) d.reestimar = true; return "ya casi (recalculando)"; }
@@ -1820,7 +1853,7 @@
     }
     if (d.on.lider && segundos % 10 === 5) ascenderLider(res); // antes que los tratos: el gold primero va al líder
     if (d.on.oroTitanio && !pasoTrato) oroATitanio(res); // antes de cazar, para que quede catpower
-    if (d.on.cazar && (lleno("manpower", 0.99) || (necesitaCaza && d.ejecutando))) {
+    if (d.on.cazar && juntando() !== "manpower" && (lleno("manpower", 0.99) || (necesitaCaza && d.ejecutando))) {
       var reservaCaza = A.RESERVA_CAZA + (pasoTrato ? (zebras() || { catpower: 50 }).catpower * Math.min(d.plan.pasos[0].k, 50) : 0);
       var pasoFest = d.ejecutando && d.plan && d.plan.pasos[0] && d.plan.pasos[0].type === "festival";
       if (fest || pasoFest) reservaCaza = Math.max(reservaCaza, FESTIVAL.manpower); // guarda el catpower del festival
@@ -2355,7 +2388,7 @@
     por += "<div style='margin-top:3px'>" + extra.join(gris(" · ")) + "</div>";
     h += det("porque", "Qué te frena", por, false, "", "Lo que más tarda, con todos los libres en el mejor oficio");
     // los botones del plan de la cola están en la cola; el modo edificios tiene los suyos
-    if (P.auto) h += "<div style='margin-top:6px'>" + botonesMarcha() + "</div>";
+    if (P.auto || P.type === "juntar") h += "<div style='margin-top:6px'>" + botonesMarcha() + "</div>";
     return h;
   }
   function mantActivo2(P) { return !!d.on.escasos && (!!P.auto || !!d.on.mantenerSiempre); }
@@ -2407,7 +2440,9 @@
   function pintar() {
     var h = '<div style="display:flex;align-items:center;gap:8px"><b style="flex:1;font-size:14px">Planificador</b><button data-a="x" style="' + est + '" title="Cerrar el panel (los automáticos se detienen)">✕</button></div>';
     h += '<div style="display:flex;gap:6px;margin:8px 0 2px;flex-wrap:wrap"><select id="kgP_meta" style="' + est + ';max-width:240px">' + opcionesMeta() + "</select>" +
-      '<button data-a="colaAgregar" style="' + est + ';background:#2a4a6b" title="Agrega esta meta al final de la cola y calcula el mejor plan para toda la cola">Agregar</button></div>';
+      '<button data-a="colaAgregar" style="' + est + ';background:#2a4a6b" title="Agrega esta meta al final de la cola y calcula el mejor plan para toda la cola">Agregar</button></div>' +
+      '<div style="display:flex;gap:6px;margin:4px 0 2px;flex-wrap:wrap"><select id="kgP_rec" style="' + est + ';max-width:240px">' + opcionesRecurso() + "</select>" +
+      '<button data-a="juntar" style="' + est + ';background:#2f6b45" title="No compra nada: junta este recurso hasta el tope (sin tope, de a tandas) con los gatitos, fabricando o comerciando (titanium con las Zebras, uranium con los Dragons…), hasta que presiones Detener. La cola queda guardada.">Juntar</button></div>';
     if (d.catnipAlerta) h += "<div style='color:#e57373;font-weight:bold;margin-top:4px'>⚠ " + d.catnipAlerta + "</div>";
     h += htmlCola();
     h += '<div id="kgP_plan">' + vista + "</div>";
@@ -2428,9 +2463,10 @@
     h += det("bitacora", "Bitácora", "<div style='font-size:11.5px;color:#c8cdd6;max-height:140px;overflow:auto'>" + (d.log.slice(0, 20).join("<br>") || "—") + "</div>", false);
     if (h === ultimoHtml) return; // nada cambió: no se redibuja (el tooltip abierto no parpadea)
     ultimoHtml = h;
-    var sel = document.getElementById("kgP_meta"), valor = sel ? sel.value : null;
+    var sel = document.getElementById("kgP_meta"), valor = sel ? sel.value : null, selR = document.getElementById("kgP_rec"), valorR = selR ? selR.value : (juntando() || "titanium");
     caja.innerHTML = h;
     if (valor) { var s2 = document.getElementById("kgP_meta"); if (s2) s2.value = valor; }
+    var s3 = document.getElementById("kgP_rec"); if (s3 && valorR) s3.value = valorR;
   }
   caja.addEventListener("change", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-k"); if (k) { d.on[k] = e.target.checked; guardar(); } });
   // el panel se redibuja cada 2 s: recordar qué secciones dejó abiertas ("toggle" no sube, por eso se escucha en captura)
@@ -2492,6 +2528,11 @@
   }
   // Recalcular: el mejor plan para la cola con lo que hay ahora; si estaba en marcha, sigue
   async function recalcular() {
+    if (d.plan && d.plan.type === "juntar") { // "Juntar": se vuelve a calcular lo mismo y sigue
+      var r = d.plan.name, seg = d.ejecutando; await calcularYMostrar("juntar", r, {});
+      if (d.plan) { d.ejecutando = seg; ultimoReparto = -999; if (!d.plan.inicio) empezarCronometro(); }
+      return;
+    }
     if (d.plan && d.plan.auto) { d.plan = null; d.ejecutando = false; ultimaBusqueda = -999; anotar("Modo edificios: vuelvo a elegir"); return; }
     var seguir = d.ejecutando;
     await calcularCola();
@@ -2512,11 +2553,25 @@
   function detener() {
     var habia = d.ejecutando || d.colaActiva || d.modoEdificios;
     d.ejecutando = false; d.colaActiva = false; d.pausa = false; d.modoEdificios = false;
-    if (d.plan && d.plan.auto) d.plan = null;
+    if (d.plan && (d.plan.auto || d.plan.type === "juntar")) { if (d.plan.type === "juntar") anotar("Dejé de juntar " + titulo(d.plan.name)); d.plan = null; }
     if (d.plan) d.plan.inicio = null; // al volver a empezar, el cronómetro arranca de cero
     if (habia) anotar("Detenido" + (d.cola.length ? " (la cola queda guardada)" : ""));
   }
   var colaIniciando = false, colaError = -1e9;
+  // "Juntar" un recurso: para lo que esté andando (la cola queda guardada) y junta ese recurso hasta que lo detengas
+  async function empezarJuntar(r) {
+    if (!R(r)) return;
+    detener(); d.juntarMeta = null;
+    await calcularYMostrar("juntar", r, {});
+    if (!d.plan) return;
+    d.ejecutando = true; d.pausa = false; ultimoReparto = -999; empezarCronometro();
+    anotar("Juntar " + titulo(r) + " hasta " + (R(r).maxValue > 0 ? "el tope (" + num(R(r).maxValue) + ")" : num(objetivoJuntar(r)) + " y sigue") + ": sin comprar nada");
+  }
+  function opcionesRecurso() {
+    return game.resPool.resources.filter(function (r) { return r.unlocked && r.name !== "catnip"; })
+      .sort(function (a, b) { return titulo(a.name).localeCompare(titulo(b.name)); })
+      .map(function (r) { return '<option value="' + r.name + '">' + attr(titulo(r.name)) + (r.maxValue > 0 ? "" : " (sin tope)") + "</option>"; }).join("");
+  }
   // al cumplir una meta de la cola, sigue con la siguiente
   async function siguienteDeCola() {
     if (colaIniciando) return; colaIniciando = true;
@@ -2538,11 +2593,13 @@
     try {
       if (a === "x") { clearInterval(timer); caja.remove(); return; }
       var cambioCola = false;
+      if (a === "juntar") { await empezarJuntar(document.getElementById("kgP_rec").value); guardar(); vista = pintarPlan(); pintar(); return; }
       if (a === "colaAgregar") {
         var v2 = document.getElementById("kgP_meta").value.split("|"), lab = etiqueta(v2[0], v2[1]);
         if (v2[0] !== "buildings" && d.cola.some(function (c) { return c.type === v2[0] && c.name === v2[1]; })) anotar(lab + " ya está en la cola");
         else {
-          d.cola.push({ type: v2[0], name: v2[1], label: lab }); anotar("Cola: agregué " + lab); cambioCola = true;
+          d.cola.push({ type: v2[0], name: v2[1], label: lab }); anotar("Cola: agregué " + lab); cambioCola = !juntando();
+          if (juntando()) anotar("Sigo juntando " + titulo(juntando()) + ": la cola empieza cuando presiones Detener y Empezar");
           if ((d.plan && d.plan.auto) || (!d.plan && d.modoEdificios)) { // el modo edificios en marcha le cede el paso a la cola
             var corria = d.ejecutando || d.modoEdificios; if (d.plan) d.plan = null; d.ejecutando = false; d.modoEdificios = false;
             if (corria) { await empezar(); cambioCola = false; }
@@ -2675,7 +2732,7 @@
     if (segundos % 10 === 0) guardar();
     if (segundos % 10 === 1) try { adjuntarPolucion(); } catch (e) { console.error("[Planificador pollution]", e); }
     if (segundos % 2 === 0) {
-      if (document.activeElement && document.activeElement.id === "kgP_meta") return;
+      if (document.activeElement && (document.activeElement.id === "kgP_meta" || document.activeElement.id === "kgP_rec")) return;
       vista = pintarPlan(); pintar();
     }
   }, 1000);
@@ -2691,13 +2748,14 @@
   if (retomar) { // la página se recargó con un plan en marcha: lo vuelve a calcular y sigue
     var rm = retomar.meta, calc;
     if (rm.auto) calc = calcularYMostrar(rm.type, rm.name, { auto: true });
+    else if (rm.type === "juntar") calc = calcularYMostrar("juntar", rm.name, {});
     else { // todo va por la cola (un plan de antes, sin cola, pasa a ser su primera meta)
       if (!rm.metaHecha && (!d.cola.length || d.cola[0].type !== rm.type || d.cola[0].name !== rm.name)) d.cola.unshift({ type: rm.type, name: rm.name, label: etiqueta(rm.type, rm.name) });
       d.colaActiva = true; calc = calcularCola();
     }
     calc.then(function () {
       if (d.plan) {
-        d.ejecutando = true; d.pausa = !!retomar.pausa; d.plan.deCola = !rm.auto;
+        d.ejecutando = true; d.pausa = !!retomar.pausa; d.plan.deCola = !rm.auto && rm.type !== "juntar";
         ["inicio", "estimado", "pausado", "pausaDesde", "hechos"].forEach(function (k) { if (retomar.meta[k] !== undefined) d.plan[k] = retomar.meta[k]; }); // sigue el mismo cronómetro
         if (!d.plan.inicio) empezarCronometro();
         anotar("Retomé el plan: " + d.plan.label); guardar();
