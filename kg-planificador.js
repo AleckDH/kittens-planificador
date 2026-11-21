@@ -424,7 +424,11 @@
   function conConsumo(M, falta, cons, stc, preciosLista) {
     var N = M.N, extra = {}, rs = Object.keys(cons);
     if (!rs.length) return falta;
-    var bruto = faltante({}, preciosLista); // lo que pide la compra, sin contar lo que ya hay
+    // lo que pide la compra en materias primas, contando lo ya fabricado (sin las materias primas guardadas):
+    // antes no contaba nada y, con los slabs del trato ya hechos (251 de 250), igual creía que se usaban minerals,
+    // les sumaba lo que comen los Smelters y mandaba a todos a Miner en vez de Hunter (año 811, 2026-11-21)
+    var soloFab = {}; Object.keys(stc).forEach(function (r) { if (esFab(r)) soloFab[r] = stc[r]; });
+    var bruto = faltante(soloFab, preciosLista);
     for (var it = 0; it < 3; it++) {
       var tJob = {}, T = 0, ok = true;
       Object.keys(falta).concat(rs).forEach(function (r) {
